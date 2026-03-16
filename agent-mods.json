@@ -1,0 +1,9 @@
+{
+  "mods": [
+    {
+      "jar": "C:\\Users\\<User>\\Documents\\lunar-agent\\example-mod.jar", __this_path_is_just_an_example__
+      "mixin": "mixins.example-mod.json", __in_case_you_want_to_use_mixins__
+      "property": "example-mod.agent.injected" __this_is_a_property_that_will_be_set_to_true_if_the_agent_is_injected__
+    }
+  ]
+}
