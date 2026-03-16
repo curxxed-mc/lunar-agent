@@ -82,6 +82,94 @@ Replace both paths with wherever you placed `agent.jar` and `agent-mods.json`.
 
 ---
 
+## Critical: `remap = false` and no refMap
+
+This is the single most common source of silent injection failures when targeting Lunar. There are two separate requirements that both must be satisfied.
+
+### Every mixin annotation must have `remap = false`
+
+Ichor applies **MCP mappings to the 1.8.9 codebase at runtime**. If you compile with SRG mappings and let Mixin remap method/field targets via a refMap, the targets will resolve to the wrong names and your injections will silently fail or crash. Every annotation that accepts `remap` must explicitly disable it:
+
+```java
+@Mixin(value = SomeClass.class, remap = false)
+public class MixinSomeClass {
+
+    @Inject(method = "someMethod", at = @At("HEAD"), remap = false)
+    private void onSomeMethod(CallbackInfo ci) { ... }
+
+    @Redirect(method = "someMethod", at = @At(...), remap = false)
+    private ReturnType redirectSomething(...) { ... }
+
+    @ModifyArg(method = "someMethod", at = @At(...), remap = false)
+    private Type modifyArg(Type arg) { ... }
+
+    @ModifyArgs(method = "someMethod", at = @At(...), remap = false)
+    private void modifyArgs(Args args) { ... }
+
+    @ModifyConstant(method = "someMethod", remap = false)
+    private Type modifyConstant(Type constant) { ... }
+
+    @ModifyVariable(method = "someMethod", at = @At(...), remap = false)
+    private Type modifyVariable(Type var) { ... }
+
+    @Overwrite(remap = false)
+    public void someMethod() { ... }
+}
+```
+
+Write all method and field targets using **MCP names** (e.g. `runTick`, `thePlayer`, `currentScreen`) — not SRG names (e.g. `func_71407_l`).
+
+### Compile without a refMap — Ichor deliberately blocks them
+
+Ichor intercepts `getResourceAsStream` and returns `null` for any filename matching `*refmap*.json`:
+
+```java
+// Ichor obfuscates all internal class and method names using a fixed alphabet
+// of only the characters R, C, I, H, O — always 29 characters long.
+// e.g. ORCCIHIRCORIHCOHCHRHRIOOCORCRC, RRCRCCCICCOIHICCROROIIROROHHII
+// This makes it intentionally difficult to reverse-engineer or statically analyze.
+
+public static boolean ORCCIHIRCORIHCOHCHRHRIOOCORCRC(IchorClassLoader self, String var1) {
+    return var1.contains("refmap") && var1.endsWith(".json");
+}
+
+public InputStream getResourceAsStream(String var1) {
+    if (ORCCIHIRCORIHCOHCHRHRIOOCORCRC(this, var1)) {
+        return null; // deliberately nulled — refMaps will never load
+    }
+    ...
+}
+```
+
+This means even if you ship a refMap inside your JAR, Mixin silently receives `null` when it tries to read it, falls back to using your annotation strings as-is, and targets whatever literal names you wrote. The fix is to simply not generate a refMap. In your `build.gradle`, do not pass `-AoutRefMapFile=` to the Mixin annotation processor, or explicitly blank it:
+
+```groovy
+compileJava {
+    options.compilerArgs += ["-AreobfSrgFile=", "-AoutRefMapFile="]
+}
+```
+
+And in your `mixins.your-mod.json`, omit the `refmap` key entirely:
+
+```json
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "your.mod.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "client": [
+    "MixinSomeClass"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+```
+
+Mixin will proceed using your literal annotation strings directly, which is exactly correct since you wrote them in MCP names with `remap = false`.
+
+---
+
 ## Writing a compatible mod
 
 For your mod to work correctly whether loaded via the agent or as a normal Forge mod, its bootstrap mixin should gate on the system property:
@@ -112,7 +200,8 @@ public class MixinMinecraft {
 }
 ```
 
-> **Note:** `runTick` is used here because it is a proven injection point that is always hit early in the game loop.
+> **Note:** `runTick` is used here because it is a proven injection point that is always hit early in the game loop. Do not use `FMLClientHandler.finishMinecraftLoading` or `GuiMainMenu` — these classes are loaded before the mixin registrar thread has had time to register your config into Ichor, so the injection will be silently skipped.
+
 ---
 
 ## Project structure
@@ -132,8 +221,10 @@ lunar-agent/
 
 **`[Mod-Agent] Error in mixin registrar`** — The mixin config name doesn't match the filename at the root of the JAR, or the JAR wasn't built with the config on its classpath root.
 
+**Injections silently do nothing** — Almost always `remap = false` is missing from an annotation, or the method target is written in SRG names instead of MCP names. Double-check every annotation.
+
 **Mod classes load but fields are null** — The mod's `init()` was never called. Verify the injection point is being hit by adding a `System.out.println` before the property check. If nothing prints, the injection was silently skipped — find a different target that is confirmed to fire.
 
 **Works on Lunar but breaks on vanilla Forge** — Ensure the system property gate is in place and the `@Mod` lifecycle events are correctly wired for the non-agent path.
 
-**Mixin conflicts with Lunar or other mods** — Lunar's Ichor applies its own mixins first. If you get `Method overwrite conflict` warnings, your `@Overwrite` is targeting a method already claimed by Lunar. Switch to `@Inject` or `@Redirect` instead.
+**Mixin conflicts with Lunar or other mods** — Lunar's Ichor applies its own mixins first. If you get `Method overwrite conflict` warnings, your `@Overwrite` is targeting a method already claimed by Lunar. Switch to `@Inject` or `@Redirect` instead, or lower your mixin priority below 200.
