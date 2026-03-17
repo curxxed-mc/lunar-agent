@@ -27,7 +27,6 @@ public class AgentBootstrap {
             return;
         }
 
-        // Set all properties immediately in premain so mixins can gate on them
         for (ModEntry mod : mods) {
             if (mod.property() != null && !mod.property().isBlank()) {
                 System.setProperty(mod.property(), "true");
@@ -35,7 +34,6 @@ public class AgentBootstrap {
             }
         }
 
-        // Add all jars to bootstrap classloader immediately
         for (ModEntry mod : mods) {
             File jarFile = new File(mod.jar());
             if (!jarFile.exists()) {
@@ -46,14 +44,16 @@ public class AgentBootstrap {
             System.out.println("[Mod-Agent] JAR added to bootstrap: " + jarFile.getName());
         }
 
-        // Register mixin configs once Ichor classloader is ready
         Thread mixinRegistrar = new Thread(() -> {
             try {
                 System.out.println("[Mod-Agent] Waiting for MixinEnvironment...");
                 ClassLoader mixinLoader = null;
 
+                // no hook, brute force brute force!! caveman-style
+                // polling every 50ms
                 while (true) {
                     Thread.sleep(50);
+                    // scanning every loaded class in the jvm to find MixinEnvironment, it feels wrong but it works and I have no better ideas.
                     for (Class<?> c : inst.getAllLoadedClasses()) {
                         if (c.getName().equals("org.spongepowered.asm.mixin.MixinEnvironment")
                                 && c.getClassLoader() != null) {
@@ -66,7 +66,9 @@ public class AgentBootstrap {
 
                 System.out.println("[Mod-Agent] Found Mixin loader: " + mixinLoader.getClass().getName());
 
+                // is this hacky? yes. does it work? also yes
                 Method addURL = mixinLoader.getClass().getMethod("addURL", java.net.URL.class);
+                // more reflection. sure. whatever. fine.
                 Class<?> mixinsClass = Class.forName("org.spongepowered.asm.mixin.Mixins", true, mixinLoader);
                 Method addConfig = mixinsClass.getMethod("addConfiguration", String.class);
 
@@ -74,21 +76,25 @@ public class AgentBootstrap {
                     File jarFile = new File(mod.jar());
                     if (!jarFile.exists()) continue;
 
+                    // shoving the jar into ichor's classloader. this is the same classloader that mixins are loaded from, so it should work fine. right?
                     addURL.invoke(mixinLoader, jarFile.toURI().toURL());
                     System.out.println("[Mod-Agent] JAR added to IchorClassLoader: " + jarFile.getName());
 
                     if (mod.mixin() != null && !mod.mixin().isBlank()) {
+                        // if nothing happens and you don't know why: remap = false.
+                        // it is ALWAYS remap = false.
                         addConfig.invoke(null, mod.mixin());
                         System.out.println("[Mod-Agent] Mixin config registered: " + mod.mixin());
                     }
                 }
 
             } catch (Exception e) {
+                // something is broken. ichor's class names are 29 chars of RCOIH nonsense.. i hate obfuscation
                 System.out.println("[Mod-Agent] Error in mixin registrar: " + e);
                 e.printStackTrace();
             }
         });
-        mixinRegistrar.setDaemon(true);
+        mixinRegistrar.setDaemon(true); // at least don't hang the JVM
         mixinRegistrar.start();
     }
 
@@ -100,7 +106,6 @@ public class AgentBootstrap {
         List<ModEntry> mods = new ArrayList<>();
         try {
             String content = Files.readString(new File(configPath).toPath());
-            // Parse each mod block between { } after "mods": [
             String[] blocks = content.split("\\{");
             for (int i = 1; i < blocks.length; i++) {
                 String block = blocks[i];
