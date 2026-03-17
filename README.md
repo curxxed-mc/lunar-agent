@@ -200,7 +200,7 @@ public class MixinMinecraft {
 }
 ```
 
-> **Note:** `runTick` is used here because it is a proven injection point that is always hit early in the game loop. Do not use `FMLClientHandler.finishMinecraftLoading` or `GuiMainMenu` — these classes are loaded before the mixin registrar thread has had time to register your config into Ichor, so the injection will be silently skipped.
+> **Note:** `runTick` is used here because it is a proven injection point that is always hit early in the game loop.
 
 ---
 
