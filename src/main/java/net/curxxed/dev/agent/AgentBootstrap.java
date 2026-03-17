@@ -27,7 +27,6 @@ public class AgentBootstrap {
             return;
         }
 
-        // Set all properties immediately in premain so mixins can gate on them
         for (ModEntry mod : mods) {
             if (mod.property() != null && !mod.property().isBlank()) {
                 System.setProperty(mod.property(), "true");
@@ -35,7 +34,6 @@ public class AgentBootstrap {
             }
         }
 
-        // Add all jars to bootstrap classloader immediately
         for (ModEntry mod : mods) {
             File jarFile = new File(mod.jar());
             if (!jarFile.exists()) {
@@ -46,7 +44,6 @@ public class AgentBootstrap {
             System.out.println("[Mod-Agent] JAR added to bootstrap: " + jarFile.getName());
         }
 
-        // Register mixin configs once Ichor classloader is ready
         Thread mixinRegistrar = new Thread(() -> {
             try {
                 System.out.println("[Mod-Agent] Waiting for MixinEnvironment...");
@@ -100,7 +97,6 @@ public class AgentBootstrap {
         List<ModEntry> mods = new ArrayList<>();
         try {
             String content = Files.readString(new File(configPath).toPath());
-            // Parse each mod block between { } after "mods": [
             String[] blocks = content.split("\\{");
             for (int i = 1; i < blocks.length; i++) {
                 String block = blocks[i];
