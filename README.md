@@ -1,20 +1,11 @@
 # lunar-agent
 
-> ## ⚠️ WARNING — ADVANCED DEVELOPERS ONLY
->
-> **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of:**
-> - Java agents and the `java.lang.instrument` API
-> - Mixin (SpongePowered ASM) and bytecode transformation
-> - Forge mod lifecycle and event systems
-> - Classloader hierarchies (bootstrap, Ichor, FML)
-> - Minecraft internals and obfuscated mappings
->
-> **If you do not know what any of the above means, this project is not for you.**  
+> **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of:** 
 > Incorrect use can corrupt game files, cause undiagnosable crashes, or permanently break other mods. No support will be provided for misconfigured setups.
 
 ---
 
-A Java agent that injects Forge mods into Lunar Client 1.8.9 at runtime — bypassing Lunar's mod discovery entirely. Supports multiple mods, mixin registration, and graceful fallback when running without the agent.
+A Java agent that injects Forge mods into Lunar Client 1.8.9 at runtime, bypassing Lunar's mod discovery entirely. Supports multiple mods, mixin registration, and graceful fallback when running without the agent.
 
 ---
 
@@ -54,7 +45,7 @@ Create `agent-mods.json` anywhere on your system. Each entry in `mods` is one mo
 {
   "mods": [
     {
-      "jar": "C:\\Users\\<User>\\Documents\\lunar-agent\\example-mod.jar",
+      "jar": "C:\\Users\\<User>\\Documents\\lunar-agent\\example-mod.jar", 
       "mixin": "mixins.example-mod.json",
       "property": "example-mod.agent.injected"
     }
@@ -79,6 +70,8 @@ In the Lunar Client launcher go to **Settings → Java Options** and add:
 ```
 
 Replace both paths with wherever you placed `agent.jar` and `agent-mods.json`.
+
+**NOTE: Make sure to enable Advanced Settings first otherwise you won't see the option to add JVM Arguments**
 
 ---
 
