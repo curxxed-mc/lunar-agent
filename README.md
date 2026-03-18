@@ -66,10 +66,10 @@ To inject multiple mods, add more entries to the `mods` array.
 In the Lunar Client launcher go to **Settings → Java Options** and add:
 
 ```
--javaagent:C:\Users\<User>\Documents\lunar-agent\agent.jar=C:\Users\<User>\Documents\lunar-agent\agent-mods.json
+-javaagent:C:\Users\<User>\Documents\lunar-agent\lunar-agent-1.0.0.jar=C:\Users\<User>\Documents\lunar-agent\agent-mods.json
 ```
 
-Replace both paths with wherever you placed `agent.jar` and `agent-mods.json`.
+Replace both paths with wherever you placed `lunar-agent-1.0.0.jar` and `agent-mods.json`.
 
 **NOTE: Make sure to enable Advanced Settings first otherwise you won't see the option to add JVM Arguments**
 
