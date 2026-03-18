@@ -1,6 +1,6 @@
 # lunar-agent
 
-> **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of minecraft, mixin and lunar internals:** 
+> **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of minecraft, mixin and lunar internals. This is more of a PoC project because in its current form if you DO decide to do this you will break compatibility with regular forge (unless you use an mcp mapped version).** 
 > Incorrect use can corrupt game files, cause undiagnosable crashes, or permanently break other mods. No support will be provided for misconfigured setups.
 
 ---
