@@ -1,0 +1,12 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "net.curxxed.dev.agent.transformer",
+  "compatibilityLevel": "JAVA_8",
+  "client": [
+    "AgentMixinBootstrap"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
