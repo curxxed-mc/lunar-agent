@@ -34,7 +34,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
             MODIFY_CONST, MODIFY_VAR, OVERWRITE
     );
 
-    // Lunar's own mixins run at priority 1000+. anything above 100 risks an overwrite conflict.
+    // Lunar's own mixins run at priority 200+. anything above 100 risks an overwrite conflict.
     // if you're STILL getting conflicts at 100: lower it, or stop using @Overwrite.
     // @Overwrite is a last resort and you probably don't actually need it.
     private static final int MAX_PRIORITY = 100;
