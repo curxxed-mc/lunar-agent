@@ -143,36 +143,6 @@ public class YourMod {
 }
 ```
 
----
-
-## Project structure
-
-```
-lunar-agent/
-├── src/main/
-│   ├── java/net/curxxed/dev/agent/
-│   │   ├── AgentBootstrap.java               # premain, transformer registration, mixin registrar
-│   │   ├── annotation/
-│   │   │   └── AgentMod.java                 # @AgentMod annotation
-│   │   ├── config/
-│   │   │   └── ModEntry.java                 # record for jar/mixin/property config entries
-│   │   └── transformer/
-│   │       ├── AgentMixinBootstrap.java      # Minecraft mixin, handles mod init on first tick
-│   │       ├── RuntimeRemapper.java          # SRG->MCP name translation
-│   │       ├── MixinAnnotationPatcher.java   # remap=false + priority clamping
-│   │       └── EventConstructorPatcher.java  # no-args constructor injection for events
-│   └── resources/
-│       ├── mixins.agent.json
-│       └── mappings/
-│           ├── methods.csv                   # MCP stable 9.10 — required
-│           └── fields.csv                    # MCP stable 9.10 — required
-├── build.gradle.kts
-├── settings.gradle.kts
-└── agent-mods.json                           # runtime config, not in src
-```
-
----
-
 ## Troubleshooting
 
 **`[Mod-Agent] JAR not found, skipping`** — The path in `agent-mods.json` is wrong or the file doesn't exist at that location.
