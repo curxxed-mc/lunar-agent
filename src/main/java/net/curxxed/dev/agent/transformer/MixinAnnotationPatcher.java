@@ -16,10 +16,15 @@ import java.util.Set;
 // you shouldn't have to touch the mod source at all.
 public class MixinAnnotationPatcher implements ClassFileTransformer {
 
-    // every annotation that accepts a remap= parameter.
-    // if you find one that's missing from this list, add it.
-    // i probably missed something obscure involving MixinExtras.
     private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
+
+    // member-level annotations that all accept remap= and need it forced to false.
+    // @Shadow is the one that was missing and causing the field_71428_T crash —
+    // it appears on both fields AND methods, so it must be handled in visitField too,
+    // not just visitMethod. that was the gap.
+    private static final String SHADOW_DESC   = "Lorg/spongepowered/asm/mixin/Shadow;";
+    private static final String ACCESSOR_DESC = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
+    private static final String INVOKER_DESC  = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
     private static final String INJECT_DESC   = "Lorg/spongepowered/asm/mixin/injection/Inject;";
     private static final String REDIRECT_DESC = "Lorg/spongepowered/asm/mixin/injection/Redirect;";
     private static final String MODIFY_ARG    = "Lorg/spongepowered/asm/mixin/injection/ModifyArg;";
@@ -28,8 +33,10 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
     private static final String MODIFY_VAR    = "Lorg/spongepowered/asm/mixin/injection/ModifyVariable;";
     private static final String OVERWRITE     = "Lorg/spongepowered/asm/mixin/Overwrite;";
 
-    // @Mixin is handled separately because it also needs priority patched, not just remap
+    // applied to both visitField and visitMethod annotations.
+    // @Mixin is NOT in here because it needs the extra priority-clamping logic.
     private static final Set<String> REMAP_TARGETS = Set.of(
+            SHADOW_DESC, ACCESSOR_DESC, INVOKER_DESC,
             INJECT_DESC, REDIRECT_DESC, MODIFY_ARG, MODIFY_ARGS,
             MODIFY_CONST, MODIFY_VAR, OVERWRITE
     );
@@ -87,6 +94,26 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
             return av;
         }
 
+        // THE FIX: @Shadow can appear on fields (e.g. `@Shadow private EntityPlayer field_71428_T`).
+        // Without this override those field annotations were never visited, so remap stayed true,
+        // and Mixin tried to use the refMap — which Ichor's classloader silently nulls out.
+        // Result: "No refMap loaded" + crash. Adding visitField with the same RemapFalseVisitor
+        // logic as visitMethod fixes it.
+        @Override
+        public FieldVisitor visitField(int access, String name, String descriptor,
+                                       String signature, Object value) {
+            return new FieldVisitor(Opcodes.ASM9,
+                    super.visitField(access, name, descriptor, signature, value)) {
+                @Override
+                public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                    AnnotationVisitor av = super.visitAnnotation(desc, visible);
+                    // @Shadow and @Accessor are the common ones on fields
+                    if (REMAP_TARGETS.contains(desc)) return new RemapFalseVisitor(av);
+                    return av;
+                }
+            };
+        }
+
         @Override
         public MethodVisitor visitMethod(int access, String name, String descriptor,
                                          String signature, String[] exceptions) {
@@ -95,7 +122,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
                 @Override
                 public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
                     AnnotationVisitor av = super.visitAnnotation(desc, visible);
-                    // @Inject/@Redirect/etc on methods only need remap=false
+                    // @Shadow/@Invoker on methods + all injection annotations
                     if (REMAP_TARGETS.contains(desc)) return new RemapFalseVisitor(av);
                     return av;
                 }
@@ -140,7 +167,8 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
         }
     }
 
-    // simpler version for method-level annotations, only handles remap=false
+    // used for all member-level annotations (fields and methods).
+    // only needs to force remap=false — no priority logic needed here.
     private static class RemapFalseVisitor extends AnnotationVisitor {
         private boolean sawRemap = false;
 
