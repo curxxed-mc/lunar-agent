@@ -46,23 +46,7 @@ Can-Retransform-Classes: true
 
 This is already configured in `build.gradle.kts`. Don't use `./gradlew jar` — you'll get a JAR without ASM shaded in and it will crash on startup.
 
-### 2. Add the MCP mapping files
-
-Place the following files from MCP stable 9.10 for 1.8.9 into `src/main/resources/mappings/`:
-
-```
-src/main/resources/mappings/methods.csv
-src/main/resources/mappings/fields.csv
-```
-
-These are required for SRG->MCP remapping. Without them, any mod built with `remapJar` (SRG mappings) will call the wrong methods and silently break on Lunar.
-
-If you've ever built a 1.8.9 Forge mod locally, ForgeGradle already downloaded them. Check:
-```
-~/.gradle/caches/minecraft/de/oceanlabs/mcp/mcp_stable/9.10/
-```
-
-### 3. Create your config file
+### 2. Create your config file
 
 Create `agent-mods.json` anywhere on your system:
 
@@ -86,7 +70,7 @@ Create `agent-mods.json` anywhere on your system:
 
 To inject multiple mods, add more entries to the `mods` array.
 
-### 4. Add the JVM argument to Lunar Client
+### 3. Add the JVM argument to Lunar Client
 
 In the Lunar Client launcher go to **Settings -> Java Options** and add:
 
