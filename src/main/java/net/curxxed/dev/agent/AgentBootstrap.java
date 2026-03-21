@@ -7,6 +7,7 @@ import net.curxxed.dev.agent.transformer.MixinAnnotationPatcher;
 import net.curxxed.dev.agent.transformer.RuntimeRemapper;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
 
@@ -135,28 +136,6 @@ public class AgentBootstrap {
                 Class<?> mixins  = Class.forName("org.spongepowered.asm.mixin.Mixins", true, mixinLoader);
                 Method addConfig = mixins.getMethod("addConfiguration", String.class);
 
-                // ===== MIXIN CLASS PRE-PATCH =====
-                //
-                // WHY this is needed (not just stripping the refmap field from JSON):
-                //
-                // Mixin reads mixin class bytes via ClassLoader.getResourceAsStream("Foo.class"),
-                // NOT through ClassLoader.defineClass. This means ClassFileTransformers registered
-                // with Instrumentation.addTransformer never fire for mixin class bytes. So:
-                //   - RuntimeRemapper never sees MixinMinecraft.class
-                //   - @Shadow field field_71428_T stays as the SRG name in the bytecode
-                //   - Mixin looks for a field named field_71428_T in Lunar's Minecraft
-                //   - Lunar's Minecraft only has MCP names → field not found → crash
-                //
-                // We fix this by reading each mixin class out of the JAR ourselves, applying
-                // all the same transforms (SRG→MCP remap + accessor renames), and writing the
-                // results into a temp directory that is added to IchorClassLoader BEFORE the
-                // mod JAR. When Mixin calls getResourceAsStream it finds our pre-patched bytes.
-                //
-                // We ALSO strip the "refmap" field from the mixin JSON while we're at it.
-                // Ichor's classloader returns null for any resource whose name contains "refmap",
-                // so a mixin config that declares a refmap puts Mixin into a broken half-state
-                // where it expects a refmap to exist but can't load it.
-
                 Path patchDir = Files.createTempDirectory("agent-mixin-patch-");
                 patchDir.toFile().deleteOnExit();
 
@@ -281,7 +260,6 @@ public class AgentBootstrap {
     }
 
     // Parses the mixin JSON from inside the JAR to get the full list of mixin class resource paths.
-    // Handles "package" + "mixins", "client", "server" arrays.
     private static List<String> resolveMixinClassPaths(JarFile jf, String mixinJsonName) {
         List<String> result = new ArrayList<>();
         java.util.jar.JarEntry entry = jf.getJarEntry(mixinJsonName);
@@ -303,7 +281,13 @@ public class AgentBootstrap {
 
     // Scans all @Mixin-annotated classes in every mod JAR for @Accessor/@Invoker methods
     // and builds a rename map: "ownerInternalName\nmethodName\ndescriptor" → "modPrefix_methodName".
-    // Called at premain time so the full map exists before the first class is loaded.
+    //
+    // THE KEY CHANGE vs the original: for every accessor method we also add a rename entry
+    // keyed to the MINECRAFT TARGET CLASS (read from the @Mixin annotation). This is needed
+    // because Lunar's own AccessorConflictPatcher renames the interface method AND call sites
+    // but never renames the Mixin-generated implementation on the target class. Without the
+    // target-class entry, the interface declares e.g. "LunarAgentMod_mug_setJumpTicks" but
+    // EntityLivingBase only has "mug_setJumpTicks" → AbstractMethodError.
     private static Map<String, String> buildAccessorRenameMap(List<ModEntry> mods) {
         Map<String, String> renames = new HashMap<>();
         final String ACCESSOR = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
@@ -319,21 +303,45 @@ public class AgentBootstrap {
                 for (java.util.jar.JarEntry entry : Collections.list(jf.entries())) {
                     if (!entry.getName().endsWith(".class")) continue;
                     try (InputStream is = jf.getInputStream(entry)) {
-                        byte[] bytes    = is.readAllBytes();
+                        byte[] bytes       = is.readAllBytes();
                         String internalName = entry.getName().replace(".class", "");
                         org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
 
-                        boolean[] isMixin = {false};
+                        // ── Pass 1: check it has @Mixin and collect the target class names ──
+                        boolean[] isMixin      = {false};
+                        List<String> targets   = new ArrayList<>();
+
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             @Override
-                            public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean v) {
-                                if (MIXIN.equals(desc)) isMixin[0] = true;
-                                return null;
+                            public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                                if (!MIXIN.equals(desc)) return null;
+                                isMixin[0] = true;
+                                // Read both @Mixin(value = {X.class}) and @Mixin(targets = {"a.b.C"})
+                                return new org.objectweb.asm.AnnotationVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                                    @Override
+                                    public org.objectweb.asm.AnnotationVisitor visitArray(String name) {
+                                        if (!"value".equals(name) && !"targets".equals(name)) return null;
+                                        boolean isValue = "value".equals(name);
+                                        return new org.objectweb.asm.AnnotationVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                                            @Override
+                                            public void visit(String n, Object value) {
+                                                if (isValue && value instanceof Type t) {
+                                                    // class literal → internal name
+                                                    targets.add(t.getInternalName());
+                                                } else if (!isValue && value instanceof String s) {
+                                                    // string target → convert dots to slashes
+                                                    targets.add(s.replace('.', '/'));
+                                                }
+                                            }
+                                        };
+                                    }
+                                };
                             }
                         }, org.objectweb.asm.ClassReader.SKIP_CODE | org.objectweb.asm.ClassReader.SKIP_FRAMES);
 
                         if (!isMixin[0]) continue;
 
+                        // ── Pass 2: collect @Accessor/@Invoker methods and register renames ──
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             @Override
                             public org.objectweb.asm.MethodVisitor visitMethod(
@@ -341,13 +349,29 @@ public class AgentBootstrap {
                                 return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9) {
                                     @Override
                                     public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean v) {
-                                        if (ACCESSOR.equals(desc) || INVOKER.equals(desc)) {
-                                            String key     = internalName + "\n" + name + "\n" + descriptor;
-                                            String newName = prefix + "_" + name;
-                                            renames.put(key, newName);
-                                            System.out.println("[Mod-Agent] Accessor rename planned: "
-                                                    + name + " → " + newName + " in " + internalName);
+                                        if (!ACCESSOR.equals(desc) && !INVOKER.equals(desc)) return null;
+
+                                        String newName = prefix + "_" + name;
+
+                                        // Entry for the accessor INTERFACE (existing behaviour).
+                                        String interfaceKey = internalName + "\n" + name + "\n" + descriptor;
+                                        renames.put(interfaceKey, newName);
+                                        System.out.println("[Mod-Agent] Accessor rename planned: "
+                                                + name + " → " + newName + " in " + internalName);
+
+                                        // ── THE FIX ────────────────────────────────────────────────
+                                        // Also add entries for every Minecraft TARGET class so that
+                                        // the Mixin-generated implementation is renamed to match
+                                        // whatever Lunar's own AccessorConflictPatcher will rename
+                                        // the interface method to. Without this, the interface and
+                                        // implementation end up with different names → AbstractMethodError.
+                                        for (String target : targets) {
+                                            String targetKey = target + "\n" + name + "\n" + descriptor;
+                                            renames.put(targetKey, newName);
+                                            System.out.println("[Mod-Agent] Target-class accessor rename planned: "
+                                                    + name + " → " + newName + " in " + target);
                                         }
+
                                         return null;
                                     }
                                 };
@@ -363,7 +387,6 @@ public class AgentBootstrap {
         return renames;
     }
 
-    // "mixins.meowtils.json" → "meowtils"
     static String deriveModPrefix(String mixinConfig) {
         if (mixinConfig == null || mixinConfig.isBlank()) return "mod";
         String s = mixinConfig;
@@ -428,8 +451,6 @@ public class AgentBootstrap {
         premain(args, inst);
     }
 
-    // Shared mapping loader — called here for the pre-remap step and by RuntimeRemapper.
-    // RuntimeRemapper now accepts pre-loaded maps via constructor rather than loading its own.
     static void loadMappings(Map<String, String> methodMap, Map<String, String> fieldMap) {
         parseMappingCsv("/mappings/methods.csv", methodMap);
         parseMappingCsv("/mappings/fields.csv",  fieldMap);
@@ -455,8 +476,6 @@ public class AgentBootstrap {
             System.out.println("[Mod-Agent] Failed to load mappings " + resource + ": " + e);
         }
     }
-
-    // ---- Everything below unchanged from original ----
 
     private static String buildModListProperty(List<ModEntry> mods) {
         StringBuilder sb = new StringBuilder();
