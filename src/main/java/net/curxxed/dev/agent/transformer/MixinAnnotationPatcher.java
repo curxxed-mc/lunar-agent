@@ -18,10 +18,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
 
     private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
 
-    // member-level annotations that all accept remap= and need it forced to false.
-    // @Shadow is the one that was missing and causing the field_71428_T crash —
-    // it appears on both fields AND methods, so it must be handled in visitField too,
-    // not just visitMethod. that was the gap.
+    // member-level annotations that all accept remap= and need it forced to false.    
     private static final String SHADOW_DESC   = "Lorg/spongepowered/asm/mixin/Shadow;";
     private static final String ACCESSOR_DESC = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
     private static final String INVOKER_DESC  = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
@@ -94,11 +91,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
             return av;
         }
 
-        // THE FIX: @Shadow can appear on fields (e.g. `@Shadow private EntityPlayer field_71428_T`).
-        // Without this override those field annotations were never visited, so remap stayed true,
-        // and Mixin tried to use the refMap — which Ichor's classloader silently nulls out.
-        // Result: "No refMap loaded" + crash. Adding visitField with the same RemapFalseVisitor
-        // logic as visitMethod fixes it.
+        
         @Override
         public FieldVisitor visitField(int access, String name, String descriptor,
                                        String signature, Object value) {
@@ -106,8 +99,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
                     super.visitField(access, name, descriptor, signature, value)) {
                 @Override
                 public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                    AnnotationVisitor av = super.visitAnnotation(desc, visible);
-                    // @Shadow and @Accessor are the common ones on fields
+                    AnnotationVisitor av = super.visitAnnotation(desc, visible);                    
                     if (REMAP_TARGETS.contains(desc)) return new RemapFalseVisitor(av);
                     return av;
                 }
