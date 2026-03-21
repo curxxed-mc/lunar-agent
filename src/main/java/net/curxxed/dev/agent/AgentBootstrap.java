@@ -363,7 +363,7 @@ public class AgentBootstrap {
         return renames;
     }
 
-    // "mixins.meowtils.json" → "meowtils"
+    // "mod.meowtils.json" → "mod"
     static String deriveModPrefix(String mixinConfig) {
         if (mixinConfig == null || mixinConfig.isBlank()) return "mod";
         String s = mixinConfig;
