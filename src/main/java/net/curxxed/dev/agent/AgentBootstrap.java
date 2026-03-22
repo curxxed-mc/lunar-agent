@@ -281,13 +281,6 @@ public class AgentBootstrap {
 
     // Scans all @Mixin-annotated classes in every mod JAR for @Accessor/@Invoker methods
     // and builds a rename map: "ownerInternalName\nmethodName\ndescriptor" → "modPrefix_methodName".
-    //
-    // THE KEY CHANGE vs the original: for every accessor method we also add a rename entry
-    // keyed to the MINECRAFT TARGET CLASS (read from the @Mixin annotation). This is needed
-    // because Lunar's own AccessorConflictPatcher renames the interface method AND call sites
-    // but never renames the Mixin-generated implementation on the target class. Without the
-    // target-class entry, the interface declares e.g. "LunarAgentMod_mug_setJumpTicks" but
-    // EntityLivingBase only has "mug_setJumpTicks" → AbstractMethodError.
     private static Map<String, String> buildAccessorRenameMap(List<ModEntry> mods) {
         Map<String, String> renames = new HashMap<>();
         final String ACCESSOR = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
@@ -358,19 +351,6 @@ public class AgentBootstrap {
                                         renames.put(interfaceKey, newName);
                                         System.out.println("[Mod-Agent] Accessor rename planned: "
                                                 + name + " → " + newName + " in " + internalName);
-
-                                        // ── THE FIX ────────────────────────────────────────────────
-                                        // Also add entries for every Minecraft TARGET class so that
-                                        // the Mixin-generated implementation is renamed to match
-                                        // whatever Lunar's own AccessorConflictPatcher will rename
-                                        // the interface method to. Without this, the interface and
-                                        // implementation end up with different names → AbstractMethodError.
-                                        for (String target : targets) {
-                                            String targetKey = target + "\n" + name + "\n" + descriptor;
-                                            renames.put(targetKey, newName);
-                                            System.out.println("[Mod-Agent] Target-class accessor rename planned: "
-                                                    + name + " → " + newName + " in " + target);
-                                        }
 
                                         return null;
                                     }
