@@ -17,7 +17,7 @@ public class AgentMixinBootstrap {
 
     private static boolean agentInitialized = false;
 
-    @Inject(method = "runTick", at = @At("HEAD"), remap = false, require = 0)
+    @Inject(method = "startGame", at = @At("RETURN"), remap = false, require = 0)
     private void agentBootstrap(CallbackInfo ci) {
         if (agentInitialized) return;
         agentInitialized = true;
@@ -88,10 +88,19 @@ public class AgentMixinBootstrap {
         Class<?> modClass = Class.forName(dotName, true, modLoader);
         System.out.println("[Mod-Agent] Loaded: " + dotName + " via " + modClass.getClassLoader());
 
-        Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
-        unsafeField.setAccessible(true);
-        Unsafe unsafe = (Unsafe) unsafeField.get(null);
-        Object instance = unsafe.allocateInstance(modClass);
+        Object instance;
+        if (isAgentMod) {
+            // @AgentMod classes may not have a no-args constructor — use Unsafe.
+            Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            Unsafe unsafe = (Unsafe) unsafeField.get(null);
+            instance = unsafe.allocateInstance(modClass);
+        } else {
+            // Forge @Mod classes rely on their constructor for field initialization
+            // (e.g. moduleManager = new ModuleManager()). Unsafe.allocateInstance skips
+            // the constructor, leaving those fields null and causing NPEs in @EventHandler.
+            instance = modClass.getDeclaredConstructor().newInstance();
+        }
         System.out.println("[Mod-Agent] Instantiated: " + dotName);
 
         if (isAgentMod) {
