@@ -7,7 +7,6 @@ import net.curxxed.dev.agent.transformer.MixinAnnotationPatcher;
 import net.curxxed.dev.agent.transformer.RuntimeRemapper;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
 
@@ -177,6 +176,37 @@ public class AgentBootstrap {
                             }
                         }
 
+                        // 3. ALSO pre-patch every accessor interface that appears in the rename map.
+                        //    Accessor interfaces are NOT listed in the mixin JSON "mixins" array —
+                        //    they're mixin interfaces, not mixin classes. Mixin reads them via
+                        //    getResourceAsStream BEFORE the ClassFileTransformer fires, so without
+                        //    this step Mixin generates implementations with the un-renamed method
+                        //    names, then our transformer renames the interface declarations afterwards
+                        //    — causing AbstractMethodError because interface and implementation diverge.
+                        Set<String> alreadyPatched = new HashSet<>(classPaths);
+                        for (String renameKey : accessorRenames.keySet()) {
+                            // renameKey format: "ownerInternalName\nmethodName\ndescriptor"
+                            String owner = renameKey.split("\n")[0];
+                            // Only process mod classes (not Minecraft target classes)
+                            if (!modClassNames.contains(owner)) continue;
+                            String classPath2 = owner + ".class";
+                            if (alreadyPatched.contains(classPath2)) continue;
+                            alreadyPatched.add(classPath2);
+
+                            java.util.jar.JarEntry classEntry = jf.getJarEntry(classPath2);
+                            if (classEntry == null) continue;
+                            try (InputStream is = jf.getInputStream(classEntry)) {
+                                byte[] original  = is.readAllBytes();
+                                byte[] processed = prePatchMixinClass(original, methodMap, fieldMap, accessorRenames);
+                                Path   outPath   = patchDir.resolve(classPath2);
+                                Files.createDirectories(outPath.getParent());
+                                Files.write(outPath, processed);
+                                System.out.println("[Mod-Agent] Pre-patched accessor interface: " + classPath2);
+                            } catch (Exception e2) {
+                                System.out.println("[Mod-Agent] Failed to pre-patch accessor: " + classPath2 + " -- " + e2);
+                            }
+                        }
+
                     } catch (IOException e) {
                         System.out.println("[Mod-Agent] Failed to pre-patch mod: " + mod.jar() + " -- " + e);
                     }
@@ -231,9 +261,9 @@ public class AgentBootstrap {
         mixinRegistrar.start();
     }
 
-    // Applies SRG→MCP rename + accessor renames to a raw mixin class byte array.
-    // Both transforms must happen here because Mixin reads these bytes directly via
-    // getResourceAsStream — they never go through ClassFileTransformer.
+    // Applies SRG→MCP rename + accessor renames + mixin annotation fixes to a raw mixin
+    // class byte array. All three must happen here because Mixin reads these bytes directly
+    // via getResourceAsStream — they never go through ClassFileTransformer.
     private static byte[] prePatchMixinClass(byte[] bytes,
                                              Map<String, String> methodMap,
                                              Map<String, String> fieldMap,
@@ -256,7 +286,79 @@ public class AgentBootstrap {
             bytes = AccessorConflictPatcher.applyRenames(bytes, accessorRenames);
         }
 
+        // Apply mixin annotation fixes (remap=false, priority clamping).
+        // MixinAnnotationPatcher is a ClassFileTransformer and never fires on mixin
+        // classes because Mixin reads them via getResourceAsStream, not the classloader.
+        // Without this, @Mixin(priority=1000) survives and causes Lunar's lower-priority
+        // mixins to fail when they try to inject into a method already merged by ours.
+        bytes = applyMixinAnnotationFixes(bytes);
+
         return bytes;
+    }
+
+    private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
+    private static final int    MAX_PRIORITY  = 100;
+
+    /**
+     * Inline equivalent of MixinAnnotationPatcher for the pre-patch step.
+     * Forces remap=false and clamps @Mixin priority to MAX_PRIORITY on the class annotation.
+     */
+    private static byte[] applyMixinAnnotationFixes(byte[] bytes) {
+        // Quick check: skip if no @Mixin annotation present.
+        boolean hasMixin = false;
+        try {
+            ClassReader cr = new ClassReader(bytes);
+            boolean[] found = {false};
+            cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                @Override
+                public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                    if (MIXIN_DESC.equals(desc)) found[0] = true;
+                    return null;
+                }
+            }, ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES);
+            hasMixin = found[0];
+        } catch (Exception e) { return bytes; }
+
+        if (!hasMixin) return bytes;
+
+        try {
+            ClassReader  cr = new ClassReader(bytes);
+            ClassWriter  cw = new ClassWriter(cr, 0);
+            cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9, cw) {
+                @Override
+                public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                    org.objectweb.asm.AnnotationVisitor av = super.visitAnnotation(desc, visible);
+                    if (!MIXIN_DESC.equals(desc)) return av;
+                    // Wrap to force remap=false and clamp priority.
+                    return new org.objectweb.asm.AnnotationVisitor(org.objectweb.asm.Opcodes.ASM9, av) {
+                        boolean sawRemap = false, sawPriority = false;
+                        @Override
+                        public void visit(String name, Object value) {
+                            if ("remap".equals(name))    { sawRemap = true;    super.visit(name, false); return; }
+                            if ("priority".equals(name)) {
+                                sawPriority = true;
+                                int p = (int) value;
+                                if (p > MAX_PRIORITY)
+                                    System.out.println("[Mod-Agent] Pre-patch: clamping mixin priority " + p + " → " + MAX_PRIORITY);
+                                super.visit(name, Math.min(p, MAX_PRIORITY));
+                                return;
+                            }
+                            super.visit(name, value);
+                        }
+                        @Override
+                        public void visitEnd() {
+                            if (!sawRemap)    super.visit("remap",    false);
+                            if (!sawPriority) super.visit("priority", MAX_PRIORITY);
+                            super.visitEnd();
+                        }
+                    };
+                }
+            }, 0);
+            return cw.toByteArray();
+        } catch (Exception e) {
+            System.out.println("[Mod-Agent] Failed to apply mixin annotation fixes: " + e);
+            return bytes;
+        }
     }
 
     // Parses the mixin JSON from inside the JAR to get the full list of mixin class resource paths.
@@ -270,7 +372,10 @@ public class AgentBootstrap {
             String pkgPath = (pkg != null) ? pkg.replace('.', '/') : "";
             for (String arrayKey : new String[]{"mixins", "client", "server"}) {
                 for (String name : extractJsonStringArray(json, arrayKey)) {
-                    result.add((pkgPath.isEmpty() ? "" : pkgPath + "/") + name + ".class");
+                    // Class names in mixin JSON arrays may use dots as package separators
+                    // (e.g. "entity.MixinEntityPlayerSP") — convert to slashes for JAR paths.
+                    String namePath = name.replace('.', '/');
+                    result.add((pkgPath.isEmpty() ? "" : pkgPath + "/") + namePath + ".class");
                 }
             }
         } catch (IOException e) {
@@ -300,41 +405,19 @@ public class AgentBootstrap {
                         String internalName = entry.getName().replace(".class", "");
                         org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
 
-                        // ── Pass 1: check it has @Mixin and collect the target class names ──
-                        boolean[] isMixin      = {false};
-                        List<String> targets   = new ArrayList<>();
-
+                        // ── Check it has @Mixin ───────────────────────────────────────────────
+                        boolean[] isMixin = {false};
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             @Override
                             public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                                if (!MIXIN.equals(desc)) return null;
-                                isMixin[0] = true;
-                                // Read both @Mixin(value = {X.class}) and @Mixin(targets = {"a.b.C"})
-                                return new org.objectweb.asm.AnnotationVisitor(org.objectweb.asm.Opcodes.ASM9) {
-                                    @Override
-                                    public org.objectweb.asm.AnnotationVisitor visitArray(String name) {
-                                        if (!"value".equals(name) && !"targets".equals(name)) return null;
-                                        boolean isValue = "value".equals(name);
-                                        return new org.objectweb.asm.AnnotationVisitor(org.objectweb.asm.Opcodes.ASM9) {
-                                            @Override
-                                            public void visit(String n, Object value) {
-                                                if (isValue && value instanceof Type t) {
-                                                    // class literal → internal name
-                                                    targets.add(t.getInternalName());
-                                                } else if (!isValue && value instanceof String s) {
-                                                    // string target → convert dots to slashes
-                                                    targets.add(s.replace('.', '/'));
-                                                }
-                                            }
-                                        };
-                                    }
-                                };
+                                if (MIXIN.equals(desc)) isMixin[0] = true;
+                                return null;
                             }
                         }, org.objectweb.asm.ClassReader.SKIP_CODE | org.objectweb.asm.ClassReader.SKIP_FRAMES);
 
                         if (!isMixin[0]) continue;
 
-                        // ── Pass 2: collect @Accessor/@Invoker methods and register renames ──
+                        // ── Collect @Accessor/@Invoker methods and register renames ──────────
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             @Override
                             public org.objectweb.asm.MethodVisitor visitMethod(
