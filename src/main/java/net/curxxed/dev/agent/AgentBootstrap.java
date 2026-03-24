@@ -5,8 +5,12 @@ import net.curxxed.dev.agent.transformer.AccessorConflictPatcher;
 import net.curxxed.dev.agent.transformer.EventConstructorPatcher;
 import net.curxxed.dev.agent.transformer.MixinAnnotationPatcher;
 import net.curxxed.dev.agent.transformer.RuntimeRemapper;
+import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodVisitor;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
 
@@ -261,13 +265,15 @@ public class AgentBootstrap {
         mixinRegistrar.start();
     }
 
-    // Applies SRG→MCP rename + accessor renames + mixin annotation fixes to a raw mixin
-    // class byte array. All three must happen here because Mixin reads these bytes directly
-    // via getResourceAsStream — they never go through ClassFileTransformer.
+    // Applies SRG→MCP rename + accessor value injection + accessor renames +
+    // mixin annotation fixes to a raw mixin class byte array.
+    // All steps must happen here because Mixin reads these bytes directly via
+    // getResourceAsStream — they never go through ClassFileTransformer.
     private static byte[] prePatchMixinClass(byte[] bytes,
                                              Map<String, String> methodMap,
                                              Map<String, String> fieldMap,
                                              Map<String, String> accessorRenames) {
+        // 1. SRG→MCP remap: translate func_/field_ names before anything else
         if (containsSrgNames(bytes)) {
             ClassReader cr = new ClassReader(bytes);
             ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
@@ -282,19 +288,127 @@ public class AgentBootstrap {
             bytes = cw.toByteArray();
         }
 
+        // 2. Inject explicit value= into @Accessor/@Invoker annotations BEFORE renaming.
+        //    This locks in the actual Minecraft field/method target name while the method
+        //    name still matches what Mixin would inflect from. After renaming the method
+        //    (e.g. getCurBlockDamageMP → getCurBlockDamageMP_raven) Mixin would try to
+        //    inflect "curBlockDamageMP_raven" as the field name, which doesn't exist.
+        //    With the explicit value already set, Mixin ignores the method name entirely
+        //    and goes straight to the value.
+        bytes = injectExplicitAccessorValues(bytes);
+
+        // 3. Rename accessor methods to avoid clashing with Lunar's own accessor methods
         if (!accessorRenames.isEmpty()) {
             bytes = AccessorConflictPatcher.applyRenames(bytes, accessorRenames);
         }
 
-        // Apply mixin annotation fixes (remap=false, priority clamping).
-        // MixinAnnotationPatcher is a ClassFileTransformer and never fires on mixin
-        // classes because Mixin reads them via getResourceAsStream, not the classloader.
-        // Without this, @Mixin(priority=1000) survives and causes Lunar's lower-priority
-        // mixins to fail when they try to inject into a method already merged by ours.
+        // 4. Apply mixin annotation fixes (remap=false, priority clamping).
+        //    MixinAnnotationPatcher is a ClassFileTransformer and never fires on mixin
+        //    classes because Mixin reads them via getResourceAsStream, not the classloader.
         bytes = applyMixinAnnotationFixes(bytes);
 
         return bytes;
     }
+
+    // ── Accessor value injection ──────────────────────────────────────────────
+
+    // For every @Accessor or @Invoker method that does NOT already have an explicit
+    // value= attribute, injects one by inflecting from the current (pre-rename) method name.
+    // This must run BEFORE applyRenames so the inflection still produces the correct field name.
+    private static byte[] injectExplicitAccessorValues(byte[] bytes) {
+        final String ACCESSOR = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
+        final String INVOKER  = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
+
+        // Quick pre-scan to avoid a full ASM pass on classes that have no accessors/invokers.
+        if (!containsUtf8(bytes, "Accessor") && !containsUtf8(bytes, "Invoker")) return bytes;
+
+        ClassReader cr = new ClassReader(bytes);
+        ClassWriter cw = new ClassWriter(cr, 0);
+
+        cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
+            @Override
+            public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                             String signature, String[] exceptions) {
+                return new MethodVisitor(Opcodes.ASM9,
+                        super.visitMethod(access, name, descriptor, signature, exceptions)) {
+                    @Override
+                    public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                        AnnotationVisitor av = super.visitAnnotation(desc, visible);
+                        if (ACCESSOR.equals(desc)) {
+                            String target = inflectAccessor(name);
+                            if (target != null) {
+                                System.out.println("[Mod-Agent] Injecting @Accessor value=\""
+                                        + target + "\" for method: " + name);
+                                return new ValueInjectingAnnotationVisitor(av, target);
+                            }
+                        } else if (INVOKER.equals(desc)) {
+                            String target = inflectInvoker(name);
+                            if (target != null) {
+                                System.out.println("[Mod-Agent] Injecting @Invoker value=\""
+                                        + target + "\" for method: " + name);
+                                return new ValueInjectingAnnotationVisitor(av, target);
+                            }
+                        }
+                        return av;
+                    }
+                };
+            }
+        }, 0);
+
+        return cw.toByteArray();
+    }
+
+    // Injects value= into an @Accessor or @Invoker annotation only if the mod author
+    // didn't already specify one explicitly. If they did, we leave it alone.
+    private static class ValueInjectingAnnotationVisitor extends AnnotationVisitor {
+        private final String targetName;
+        private boolean sawValue = false;
+
+        ValueInjectingAnnotationVisitor(AnnotationVisitor av, String targetName) {
+            super(Opcodes.ASM9, av);
+            this.targetName = targetName;
+        }
+
+        @Override
+        public void visit(String name, Object value) {
+            if ("value".equals(name)) sawValue = true;
+            super.visit(name, value);
+        }
+
+        @Override
+        public void visitEnd() {
+            if (!sawValue) super.visit("value", targetName);
+            super.visitEnd();
+        }
+    }
+
+    // Inflects the target field name from an @Accessor method name.
+    // Strips get/set/is prefix and lowercases the first remaining character.
+    // Returns null if the method name doesn't match any known prefix
+    // (in which case the mod author must have provided an explicit value= themselves).
+    private static String inflectAccessor(String methodName) {
+        for (String prefix : new String[]{"get", "set", "is"}) {
+            if (methodName.startsWith(prefix) && methodName.length() > prefix.length()) {
+                String s = methodName.substring(prefix.length());
+                return Character.toLowerCase(s.charAt(0)) + s.substring(1);
+            }
+        }
+        return null;
+    }
+
+    // Inflects the target method name from an @Invoker method name.
+    // Strips call/invoke prefix and lowercases the first remaining character.
+    private static String inflectInvoker(String methodName) {
+        for (String prefix : new String[]{"call", "invoke"}) {
+            if (methodName.startsWith(prefix) && methodName.length() > prefix.length()) {
+                String s = methodName.substring(prefix.length());
+                return Character.toLowerCase(s.charAt(0)) + s.substring(1);
+            }
+        }
+        return null;
+    }
+
+    // ── Mixin annotation fixes (inline copy of MixinAnnotationPatcher logic) ──
 
     private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
     private static final int    MAX_PRIORITY  = 100;
@@ -309,9 +423,9 @@ public class AgentBootstrap {
         try {
             ClassReader cr = new ClassReader(bytes);
             boolean[] found = {false};
-            cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+            cr.accept(new ClassVisitor(Opcodes.ASM9) {
                 @Override
-                public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
                     if (MIXIN_DESC.equals(desc)) found[0] = true;
                     return null;
                 }
@@ -324,13 +438,13 @@ public class AgentBootstrap {
         try {
             ClassReader  cr = new ClassReader(bytes);
             ClassWriter  cw = new ClassWriter(cr, 0);
-            cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9, cw) {
+            cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
                 @Override
-                public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                    org.objectweb.asm.AnnotationVisitor av = super.visitAnnotation(desc, visible);
+                public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                    AnnotationVisitor av = super.visitAnnotation(desc, visible);
                     if (!MIXIN_DESC.equals(desc)) return av;
                     // Wrap to force remap=false and clamp priority.
-                    return new org.objectweb.asm.AnnotationVisitor(org.objectweb.asm.Opcodes.ASM9, av) {
+                    return new AnnotationVisitor(Opcodes.ASM9, av) {
                         boolean sawRemap = false, sawPriority = false;
                         @Override
                         public void visit(String name, Object value) {
@@ -361,6 +475,8 @@ public class AgentBootstrap {
         }
     }
 
+    // ── Mixin class path resolution ───────────────────────────────────────────
+
     // Parses the mixin JSON from inside the JAR to get the full list of mixin class resource paths.
     private static List<String> resolveMixinClassPaths(JarFile jf, String mixinJsonName) {
         List<String> result = new ArrayList<>();
@@ -384,8 +500,10 @@ public class AgentBootstrap {
         return result;
     }
 
+    // ── Accessor rename map ───────────────────────────────────────────────────
+
     // Scans all @Mixin-annotated classes in every mod JAR for @Accessor/@Invoker methods
-    // and builds a rename map: "ownerInternalName\nmethodName\ndescriptor" → "modPrefix_methodName".
+    // and builds a rename map: "ownerInternalName\nmethodName\ndescriptor" → "methodName_modPrefix".
     private static Map<String, String> buildAccessorRenameMap(List<ModEntry> mods) {
         Map<String, String> renames = new HashMap<>();
         final String ACCESSOR = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
@@ -427,9 +545,11 @@ public class AgentBootstrap {
                                     public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean v) {
                                         if (!ACCESSOR.equals(desc) && !INVOKER.equals(desc)) return null;
 
-                                        String newName = prefix + "_" + name;
+                                        // Suffix the mod prefix so the get/set/is/call/invoke prefix
+                                        // stays at position 0 — Mixin inflects from the start of the
+                                        // name and would fail if the prefix came first.
+                                        String newName = name + "_" + prefix;
 
-                                        // Entry for the accessor INTERFACE (existing behaviour).
                                         String interfaceKey = internalName + "\n" + name + "\n" + descriptor;
                                         renames.put(interfaceKey, newName);
                                         System.out.println("[Mod-Agent] Accessor rename planned: "
@@ -449,6 +569,8 @@ public class AgentBootstrap {
         }
         return renames;
     }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     static String deriveModPrefix(String mixinConfig) {
         if (mixinConfig == null || mixinConfig.isBlank()) return "mod";
@@ -477,7 +599,20 @@ public class AgentBootstrap {
         return false;
     }
 
-    // Minimal JSON helpers — no external dependency, no full parser needed
+    private static boolean containsUtf8(byte[] bytes, String needle) {
+        byte[] n = needle.getBytes(StandardCharsets.UTF_8);
+        outer:
+        for (int i = 0; i <= bytes.length - n.length; i++) {
+            for (int j = 0; j < n.length; j++) {
+                if (bytes[i + j] != n[j]) continue outer;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // ── Minimal JSON helpers ──────────────────────────────────────────────────
+
     static String extractJsonString(String json, String key) {
         String search = "\"" + key + "\"";
         int ki = json.indexOf(search);

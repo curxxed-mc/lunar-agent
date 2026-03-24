@@ -29,6 +29,14 @@ import java.util.*;
 // the mixin class pre-patching step (mixin classes are read by Mixin directly via
 // getResourceAsStream and never go through ClassFileTransformer, so we must patch them
 // ahead of time in the temp directory).
+//
+// NOTE ON NAMING CONVENTION:
+// We suffix the mod prefix (e.g. getCurBlockDamageMP_raven) rather than prefixing it
+// (e.g. raven_getCurBlockDamageMP). This is important because AgentBootstrap separately
+// injects an explicit value= into the @Accessor annotation before this rename runs,
+// which tells Mixin the exact field to target regardless of the method name. The suffix
+// strategy is kept consistent with that approach and avoids any future regression if the
+// value= injection were ever skipped.
 public class AccessorConflictPatcher implements ClassFileTransformer {
 
     private final Set<String> modClassNames;
