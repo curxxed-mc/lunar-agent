@@ -9,30 +9,9 @@ import java.util.*;
 // Renames @Accessor and @Invoker methods on mixin interfaces to avoid clashing with
 // Lunar's own methods on the same target class.
 //
-// THE CORE PROBLEM THIS SOLVES:
-// Lunar has its own AccessorConflictPatcher that also runs and prefixes ALL accessor
-// methods from agent mods with "LunarAgentMod_". It correctly renames:
-//   1. The method declaration in the accessor interface
-//   2. All call sites in mod classes
-// But it does NOT rename the Mixin-generated implementation on the target Minecraft
-// class (e.g. EntityPlayerSP). This mismatch causes AbstractMethodError at runtime.
-//
-// Our fix: when we build the rename map we also record which Minecraft target classes
-// have accessor implementations that need to be renamed. We then transform those
-// target classes in addition to mod classes so the implementation name always matches
-// the interface name, regardless of what Lunar's own patcher does on top.
-//
-// The rename map key is:  "ownerInternalName\nmethodName\ndescriptor"
-// The rename map value is: newMethodName
-//
-// IMPORTANT: applyRenames() is also called as a static helper by AgentBootstrap during
-// the mixin class pre-patching step (mixin classes are read by Mixin directly via
-// getResourceAsStream and never go through ClassFileTransformer, so we must patch them
-// ahead of time in the temp directory).
-//
 // NOTE ON NAMING CONVENTION:
-// We suffix the mod prefix (e.g. getCurBlockDamageMP_raven) rather than prefixing it
-// (e.g. raven_getCurBlockDamageMP). This is important because AgentBootstrap separately
+// We suffix the mod prefix (e.g. getCurBlockDamageMP_modid) rather than prefixing it.
+// This is important because AgentBootstrap separately
 // injects an explicit value= into the @Accessor annotation before this rename runs,
 // which tells Mixin the exact field to target regardless of the method name. The suffix
 // strategy is kept consistent with that approach and avoids any future regression if the
@@ -48,8 +27,6 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
         this.modClassNames = modClassNames;
         this.renames       = renames;
     }
-
-    // ── ClassFileTransformer ──────────────────────────────────────────────────
 
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
@@ -75,9 +52,6 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
         return result;
     }
 
-    // ── Core rename logic ─────────────────────────────────────────────────────
-
-    // Static so AgentBootstrap can call it during mixin class pre-patching.
     public static byte[] applyRenames(byte[] bytes, Map<String, String> renames) {
         ClassReader cr = new ClassReader(bytes);
         ClassWriter cw = new ClassWriter(cr, 0);
@@ -105,7 +79,6 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
                             + name + " → " + newName + " in " + currentOwner);
                     return super.visitMethod(access, newName, descriptor, signature, exceptions);
                 }
-                // Pass through unchanged but wrap to rewrite any call sites inside.
                 return new MethodVisitor(Opcodes.ASM9,
                         super.visitMethod(access, name, descriptor, signature, exceptions)) {
                     @Override
@@ -128,7 +101,6 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
         return cw.toByteArray();
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static boolean containsUtf8(byte[] bytes, String needle) {
         byte[] n = needle.getBytes(java.nio.charset.StandardCharsets.UTF_8);

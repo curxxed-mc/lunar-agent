@@ -12,6 +12,9 @@ import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 
+// This Mixin is responsible for bootstrapping mods on the first tick of the game. If you init mods yourself via targeting startGame t
+// his will do nothing provided your mod doesn't have a @Mod annotation if you do you will init the mod twice which
+// is not ideal at all.
 @Mixin(targets = "net.minecraft.client.Minecraft", remap = false)
 public class AgentMixinBootstrap {
 
@@ -28,10 +31,8 @@ public class AgentMixinBootstrap {
             return;
         }
 
-        System.out.println("[Mod-Agent] First tick -- bootstrapping mods...");
+        System.out.println("[Mod-Agent] First tick, bootstrapping mods...");
 
-        // After Mixin merges this into Minecraft, 'this' is a Minecraft instance.
-        // this.getClass().getClassLoader() == Genesis — reliable, no string lookups needed.
         ClassLoader genesisLoader = this.getClass().getClassLoader();
 
         ClassLoader modLoader = buildModLoader(genesisLoader);
@@ -43,10 +44,9 @@ public class AgentMixinBootstrap {
             String className   = parts[0];
             String initMethod  = parts.length > 1 ? parts[1] : "";
             String property    = parts.length > 2 ? parts[2] : "";
-            boolean isAgentMod = parts.length > 3 && "1".equals(parts[3]);
 
             try {
-                initMod(className, initMethod, property, isAgentMod, modLoader);
+                initMod(className, initMethod, property, modLoader);
             } catch (Throwable t) {
                 System.out.println("[Mod-Agent] Failed to init mod: " + className + " -- " + t);
                 t.printStackTrace();
@@ -78,9 +78,9 @@ public class AgentMixinBootstrap {
     }
 
     private static void initMod(String className, String initMethod, String property,
-                                boolean isAgentMod, ClassLoader modLoader) throws Exception {
-        if (!isAgentMod && !property.isBlank() && !Boolean.getBoolean(property)) {
-            System.out.println("[Mod-Agent] Skipping " + className + " -- not in injected environment.");
+                                 ClassLoader modLoader) throws Exception {
+        if (!property.isBlank() && !Boolean.getBoolean(property)) {
+            System.out.println("[Mod-Agent] Skipping " + className + ", not in injected environment.");
             return;
         }
 
@@ -89,30 +89,10 @@ public class AgentMixinBootstrap {
         System.out.println("[Mod-Agent] Loaded: " + dotName + " via " + modClass.getClassLoader());
 
         Object instance;
-        if (isAgentMod) {
-            // @AgentMod classes may not have a no-args constructor — use Unsafe.
-            Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
-            unsafeField.setAccessible(true);
-            Unsafe unsafe = (Unsafe) unsafeField.get(null);
-            instance = unsafe.allocateInstance(modClass);
-        } else {
-            // Forge @Mod classes rely on their constructor for field initialization
-            // (e.g. moduleManager = new ModuleManager()). Unsafe.allocateInstance skips
-            // the constructor, leaving those fields null and causing NPEs in @EventHandler.
-            instance = modClass.getDeclaredConstructor().newInstance();
-        }
+        instance = modClass.getDeclaredConstructor().newInstance();
         System.out.println("[Mod-Agent] Instantiated: " + dotName);
 
-        if (isAgentMod) {
-            try {
-                Method m = modClass.getDeclaredMethod("init");
-                m.setAccessible(true);
-                m.invoke(instance);
-                System.out.println("[Mod-Agent] Called init() on @AgentMod: " + dotName);
-            } catch (NoSuchMethodException ignored) {
-                System.out.println("[Mod-Agent] No init() found -- constructor-only init for " + dotName);
-            }
-        } else if (!initMethod.isBlank()) {
+       if (!initMethod.isBlank()) {
             Class<?> eventClass = Class.forName(
                     "net.minecraftforge.fml.common.event.FMLInitializationEvent", true, modLoader);
             Method m = modClass.getDeclaredMethod(initMethod, eventClass);
@@ -120,7 +100,7 @@ public class AgentMixinBootstrap {
             m.invoke(instance, (Object) null);
             System.out.println("[Mod-Agent] Called init: " + initMethod + " on " + dotName);
         } else {
-            System.out.println("[Mod-Agent] No init method -- constructor-only init for " + dotName);
+            System.out.println("[Mod-Agent] No init method, constructor-only init for " + dotName);
         }
     }
 }

@@ -29,7 +29,6 @@ public class AgentBootstrap {
     private static final String MOD_LIST_PROPERTY  = "lunar.agent.bootstrap.mods";
     private static final String JAR_PATHS_PROPERTY = "lunar.agent.bootstrap.jar.paths";
     private static final String FORGE_MOD_DESC     = "Lnet/minecraftforge/fml/common/Mod;";
-    private static final String AGENT_MOD_DESC     = "Lnet/curxxed/dev/agent/annotation/AgentMod;";
 
     public static void premain(String args, Instrumentation inst) throws Exception {
         try {
@@ -692,11 +691,6 @@ public class AgentBootstrap {
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             private String className;
                             @Override public void visit(int v, int a, String name, String sig, String sup, String[] i) { this.className = name; }
-                            @Override public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                                if (FORGE_MOD_DESC.equals(desc))      { modClass[0] = className; isAgentMod[0] = false; }
-                                else if (AGENT_MOD_DESC.equals(desc)) { modClass[0] = className; isAgentMod[0] = true;  }
-                                return null;
-                            }
                             @Override public org.objectweb.asm.MethodVisitor visitMethod(int a, String name, String desc, String sig, String[] ex) {
                                 if (!desc.contains("net/minecraftforge/fml/common/event/FMLInitializationEvent")) return null;
                                 return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9) {
