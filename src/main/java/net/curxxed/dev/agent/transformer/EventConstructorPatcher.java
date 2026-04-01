@@ -31,7 +31,7 @@ public class EventConstructorPatcher implements ClassFileTransformer {
         ClassReader cr = new ClassReader(classfileBuffer);
 
         if (!extendsForgeEvent(cr)) return null;
-        if (hasNoArgsConstructor(cr)) return null; // already fine, nothing to do
+        if (hasNoArgsConstructor(cr)) return null;
 
         // COMPUTE_FRAMES here because we're generating new bytecode from scratch.
         // unlike RuntimeRemapper which only renames things, we're actually adding a method,
