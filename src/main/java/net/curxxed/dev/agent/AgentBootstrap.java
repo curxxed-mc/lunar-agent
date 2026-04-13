@@ -687,10 +687,16 @@ public class AgentBootstrap {
                         org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
                         String[] modClass    = {null};
                         String[] initMethod  = {null};
-                        boolean[] isAgentMod = {false};
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             private String className;
                             @Override public void visit(int v, int a, String name, String sig, String sup, String[] i) { this.className = name; }
+                            @Override
+                            public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                                if (FORGE_MOD_DESC.equals(desc)) {
+                                    modClass[0] = className;
+                                }
+                                return null;
+                            }
                             @Override public org.objectweb.asm.MethodVisitor visitMethod(int a, String name, String desc, String sig, String[] ex) {
                                 if (!desc.contains("net/minecraftforge/fml/common/event/FMLInitializationEvent")) return null;
                                 return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9) {
@@ -704,9 +710,8 @@ public class AgentBootstrap {
                         if (modClass[0] != null) {
                             if (!sb.isEmpty()) sb.append(",");
                             sb.append(modClass[0]).append("|").append(initMethod[0] != null ? initMethod[0] : "")
-                                    .append("|").append(mod.property() != null ? mod.property() : "")
-                                    .append("|").append(isAgentMod[0] ? "1" : "0");
-                            System.out.println("[Mod-Agent] Discovered " + (isAgentMod[0] ? "@AgentMod" : "@Mod") + ": " + modClass[0] + " (init: " + initMethod[0] + ")");
+                                    .append("|").append(mod.property() != null ? mod.property() : "");
+                            System.out.println("[Mod-Agent] Discovered " + ("@Mod") + ": " + modClass[0] + " (init: " + initMethod[0] + ")");
                         }
                     }
                 }
