@@ -16,7 +16,6 @@ import org.objectweb.asm.commons.Remapper;
 
 import java.io.*;
 import java.lang.instrument.Instrumentation;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -75,6 +74,9 @@ public class AgentBootstrap {
             }
         }
 
+        // Only forge mods (those with @Mod) are added to the mod list — forgeless mods
+        // (OptiFine-only etc.) only need their JARs on the classpath and their mixins
+        // registered; they don't go through lifecycle initialization.
         String serialized = buildModListProperty(mods);
         if (!serialized.isBlank()) {
             System.setProperty(MOD_LIST_PROPERTY, serialized);
@@ -134,9 +136,9 @@ public class AgentBootstrap {
 
                 System.out.println("[Mod-Agent] Found Mixin loader: " + mixinLoader.getClass().getName());
 
-                Method addURL    = mixinLoader.getClass().getMethod("addURL", java.net.URL.class);
+                java.lang.reflect.Method addURL    = mixinLoader.getClass().getMethod("addURL", java.net.URL.class);
                 Class<?> mixins  = Class.forName("org.spongepowered.asm.mixin.Mixins", true, mixinLoader);
-                Method addConfig = mixins.getMethod("addConfiguration", String.class);
+                java.lang.reflect.Method addConfig = mixins.getMethod("addConfiguration", String.class);
 
                 Path patchDir = Files.createTempDirectory("agent-mixin-patch-");
                 patchDir.toFile().deleteOnExit();
@@ -309,7 +311,6 @@ public class AgentBootstrap {
         return bytes;
     }
 
-    // ── Accessor value injection ──────────────────────────────────────────────
 
     // For every @Accessor or @Invoker method that does NOT already have an explicit
     // value= attribute, injects one by inflecting from the current (pre-rename) method name.
@@ -407,7 +408,6 @@ public class AgentBootstrap {
         return null;
     }
 
-    // ── Mixin annotation fixes (inline copy of MixinAnnotationPatcher logic) ──
 
     private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
     private static final int    MAX_PRIORITY  = 100;
@@ -474,7 +474,6 @@ public class AgentBootstrap {
         }
     }
 
-    // ── Mixin class path resolution ───────────────────────────────────────────
 
     // Parses the mixin JSON from inside the JAR to get the full list of mixin class resource paths.
     private static List<String> resolveMixinClassPaths(JarFile jf, String mixinJsonName) {
@@ -499,8 +498,6 @@ public class AgentBootstrap {
         return result;
     }
 
-    // ── Accessor rename map ───────────────────────────────────────────────────
-
     // Scans all @Mixin-annotated classes in every mod JAR for @Accessor/@Invoker methods
     // and builds a rename map: "ownerInternalName\nmethodName\ndescriptor" → "methodName_modPrefix".
     private static Map<String, String> buildAccessorRenameMap(List<ModEntry> mods) {
@@ -521,8 +518,6 @@ public class AgentBootstrap {
                         byte[] bytes       = is.readAllBytes();
                         String internalName = entry.getName().replace(".class", "");
                         org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
-
-                        // ── Check it has @Mixin ───────────────────────────────────────────────
                         boolean[] isMixin = {false};
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             @Override
@@ -534,7 +529,6 @@ public class AgentBootstrap {
 
                         if (!isMixin[0]) continue;
 
-                        // ── Collect @Accessor/@Invoker methods and register renames ──────────
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             @Override
                             public org.objectweb.asm.MethodVisitor visitMethod(
@@ -569,7 +563,6 @@ public class AgentBootstrap {
         return renames;
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     static String deriveModPrefix(String mixinConfig) {
         if (mixinConfig == null || mixinConfig.isBlank()) return "mod";
@@ -610,40 +603,6 @@ public class AgentBootstrap {
         return false;
     }
 
-    // ── Minimal JSON helpers ──────────────────────────────────────────────────
-
-    static String extractJsonString(String json, String key) {
-        String search = "\"" + key + "\"";
-        int ki = json.indexOf(search);
-        if (ki == -1) return null;
-        int colon = json.indexOf(':', ki + search.length());
-        if (colon == -1) return null;
-        int start = json.indexOf('"', colon + 1);
-        if (start == -1) return null;
-        int end = json.indexOf('"', start + 1);
-        if (end == -1) return null;
-        return json.substring(start + 1, end);
-    }
-
-    static List<String> extractJsonStringArray(String json, String key) {
-        List<String> result = new ArrayList<>();
-        String search = "\"" + key + "\"";
-        int ki = json.indexOf(search);
-        if (ki == -1) return result;
-        int colon = json.indexOf(':', ki + search.length());
-        if (colon == -1) return result;
-        int arrayStart = json.indexOf('[', colon + 1);
-        if (arrayStart == -1) return result;
-        int arrayEnd = json.indexOf(']', arrayStart + 1);
-        if (arrayEnd == -1) return result;
-        for (String token : json.substring(arrayStart + 1, arrayEnd).split(",")) {
-            token = token.trim();
-            if (token.startsWith("\"") && token.endsWith("\""))
-                result.add(token.substring(1, token.length() - 1));
-        }
-        return result;
-    }
-
     public static void agentmain(String args, Instrumentation inst) throws Exception {
         premain(args, inst);
     }
@@ -674,6 +633,7 @@ public class AgentBootstrap {
         }
     }
 
+
     private static String buildModListProperty(List<ModEntry> mods) {
         StringBuilder sb = new StringBuilder();
         for (ModEntry mod : mods) {
@@ -685,33 +645,24 @@ public class AgentBootstrap {
                     try (InputStream is = jf.getInputStream(entry)) {
                         byte[] bytes = is.readAllBytes();
                         org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
-                        String[] modClass    = {null};
-                        String[] initMethod  = {null};
+                        String[] modClass = {null};
                         cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
                             private String className;
-                            @Override public void visit(int v, int a, String name, String sig, String sup, String[] i) { this.className = name; }
+                            @Override public void visit(int v, int a, String name, String sig, String sup, String[] i) {
+                                this.className = name;
+                            }
                             @Override
                             public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                                if (FORGE_MOD_DESC.equals(desc)) {
-                                    modClass[0] = className;
-                                }
+                                if (FORGE_MOD_DESC.equals(desc)) modClass[0] = className;
                                 return null;
                             }
-                            @Override public org.objectweb.asm.MethodVisitor visitMethod(int a, String name, String desc, String sig, String[] ex) {
-                                if (!desc.contains("net/minecraftforge/fml/common/event/FMLInitializationEvent")) return null;
-                                return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9) {
-                                    @Override public org.objectweb.asm.AnnotationVisitor visitAnnotation(String d, boolean v) {
-                                        if (d.contains("EventHandler")) initMethod[0] = name;
-                                        return null;
-                                    }
-                                };
-                            }
                         }, org.objectweb.asm.ClassReader.SKIP_CODE | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+
                         if (modClass[0] != null) {
                             if (!sb.isEmpty()) sb.append(",");
-                            sb.append(modClass[0]).append("|").append(initMethod[0] != null ? initMethod[0] : "")
+                            sb.append(modClass[0])
                                     .append("|").append(mod.property() != null ? mod.property() : "");
-                            System.out.println("[Mod-Agent] Discovered " + ("@Mod") + ": " + modClass[0] + " (init: " + initMethod[0] + ")");
+                            System.out.println("[Mod-Agent] Discovered @Mod: " + modClass[0]);
                         }
                     }
                 }
@@ -767,5 +718,37 @@ public class AgentBootstrap {
         int end = block.indexOf("\"", start + 1);
         if (end == -1) return null;
         return block.substring(start + 1, end);
+    }
+
+    static String extractJsonString(String json, String key) {
+        String search = "\"" + key + "\"";
+        int ki = json.indexOf(search);
+        if (ki == -1) return null;
+        int colon = json.indexOf(':', ki + search.length());
+        if (colon == -1) return null;
+        int start = json.indexOf('"', colon + 1);
+        if (start == -1) return null;
+        int end = json.indexOf('"', start + 1);
+        if (end == -1) return null;
+        return json.substring(start + 1, end);
+    }
+
+    static List<String> extractJsonStringArray(String json, String key) {
+        List<String> result = new ArrayList<>();
+        String search = "\"" + key + "\"";
+        int ki = json.indexOf(search);
+        if (ki == -1) return result;
+        int colon = json.indexOf(':', ki + search.length());
+        if (colon == -1) return result;
+        int arrayStart = json.indexOf('[', colon + 1);
+        if (arrayStart == -1) return result;
+        int arrayEnd = json.indexOf(']', arrayStart + 1);
+        if (arrayEnd == -1) return result;
+        for (String token : json.substring(arrayStart + 1, arrayEnd).split(",")) {
+            token = token.trim();
+            if (token.startsWith("\"") && token.endsWith("\""))
+                result.add(token.substring(1, token.length() - 1));
+        }
+        return result;
     }
 }
