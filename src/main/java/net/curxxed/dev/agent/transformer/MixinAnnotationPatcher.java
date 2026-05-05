@@ -11,9 +11,6 @@ import java.util.Set;
 //   - forces remap=false on every mixin annotation that supports it
 //   - clamps @Mixin priority to MAX_PRIORITY so we don't conflict with Lunar's own mixins
 //
-// why do this at the agent level instead of just writing it in the mod source?
-// because the whole point of this agent is that you drop ANY forge mod in and it works.
-// you shouldn't have to touch the mod source at all.
 public class MixinAnnotationPatcher implements ClassFileTransformer {
 
     private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
