@@ -12,6 +12,8 @@ import java.net.URLClassLoader;
 
 // Bootstraps forge mods on the first tick of the game by invoking their FML lifecycle
 // methods in order (preInit → init → postInit) via ModLifecycleInvoker.
+// note that if your mod isn't a forge mod YOU are expected to init your own mod inside
+// startGame.
 @Mixin(targets = "net.minecraft.client.Minecraft", remap = false)
 public class AgentMixinBootstrap {
 
