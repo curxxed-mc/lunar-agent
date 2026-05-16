@@ -1,10 +1,5 @@
 # lunar-agent
 
-> **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of Minecraft, Mixin, and Lunar Client internals.**
-> Incorrect use can corrupt game files, cause undiagnosable crashes, or permanently break other mods. No support will be provided for misconfigured setups.
-
----
-
 A Java agent that injects mods into Lunar Client 1.8.9 at runtime, bypassing Lunar's mod discovery entirely. Supports standalone mods (provided they mixin themselves in Minecraft.startGame) in Lunar Client as well as Forge mods when running the Lunar Client + Forge module. Includes automatic SRG→MCP remapping, mixin annotation patching, and bake cache invalidation.
 
 You drop a mod JAR in. It works. That's the goal.
