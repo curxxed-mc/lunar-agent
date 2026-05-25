@@ -59,16 +59,17 @@ public enum Environment {
     }
 
     private static Environment detectFromResources() {
-        ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
-        if (hasResource(contextLoader, "ave.class")) return OBF;
-        if (hasResource(contextLoader, "net/minecraft/client/Minecraft.class")) {
-            if (hasResource(contextLoader, "net/minecraftforge/common/MinecraftForge.class")) {
-                return SRG;
-            }
-            return MCP;
+    ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
+    if (hasResource(contextLoader, "ave.class")) return OBF;
+    if (hasResource(contextLoader, "net/minecraft/client/Minecraft.class")) {
+        boolean isLunar = hasResource(contextLoader, "com/moonsworth/lunar/genesis/Genesis.class");
+    if (hasResource(contextLoader, "net/minecraftforge/common/MinecraftForge.class") && !isLunar) {
+           return SRG;
         }
-        return null;
+        return MCP;
     }
+    return null;
+}
 
     private static boolean hasResource(ClassLoader loader, String name) {
         try {
