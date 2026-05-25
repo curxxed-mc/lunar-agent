@@ -1,8 +1,12 @@
 package net.curxxed.dev.agent;
 
 import net.curxxed.dev.agent.config.ModEntry;
+import net.curxxed.dev.agent.invoke.ModLifecycleInvoker;
+import net.curxxed.dev.agent.mappings.MappingRegistry;
 import net.curxxed.dev.agent.transformer.AccessorConflictPatcher;
+import net.curxxed.dev.agent.transformer.Environment;
 import net.curxxed.dev.agent.transformer.EventConstructorPatcher;
+import net.curxxed.dev.agent.transformer.MinecraftBootstrapTransformer;
 import net.curxxed.dev.agent.transformer.MixinAnnotationPatcher;
 import net.curxxed.dev.agent.transformer.RuntimeRemapper;
 import org.objectweb.asm.AnnotationVisitor;
@@ -11,22 +15,24 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.commons.ClassRemapper;
-import org.objectweb.asm.commons.Remapper;
 
 import java.io.*;
 import java.lang.instrument.Instrumentation;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.jar.JarFile;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class AgentBootstrap {
 
     private static final String MOD_LIST_PROPERTY  = "lunar.agent.bootstrap.mods";
     private static final String JAR_PATHS_PROPERTY = "lunar.agent.bootstrap.jar.paths";
+    private static final String BOOTSTRAPPED_PROPERTY = "lunar.agent.bootstrap.initialized";
     private static final String FORGE_MOD_DESC     = "Lnet/minecraftforge/fml/common/Mod;";
 
     public static void premain(String args, Instrumentation inst) throws Exception {
@@ -99,12 +105,11 @@ public class AgentBootstrap {
         Set<String> modClassNames = collectModClassNames(mods);
         System.out.println("[Mod-Agent] Tracking " + modClassNames.size() + " mod classes for transformation.");
 
-        // Load mappings once and share them with both RuntimeRemapper (which handles
-        // normal class loads) and the pre-remap step below (which handles mixin classes
-        // that Mixin reads via getResourceAsStream and which never go through defineClass).
-        Map<String, String> methodMap = new HashMap<>();
-        Map<String, String> fieldMap  = new HashMap<>();
-        loadMappings(methodMap, fieldMap);
+        // Load combined mappings once and share them with RuntimeRemapper, mixin pre-patching,
+        // and the direct Minecraft bootstrap transformer.
+        MappingRegistry mappings = loadMappings();
+        AtomicReference<Environment> runtimeEnvironment =
+                new AtomicReference<>(Environment.detectRuntimeEnvironment());
 
         // Scan every mod JAR right now at premain time to build the accessor rename map.
         // This must happen before any mod classes are loaded so AccessorConflictPatcher
@@ -112,8 +117,9 @@ public class AgentBootstrap {
         Map<String, String> accessorRenames = buildAccessorRenameMap(mods);
         System.out.println("[Mod-Agent] Accessor renames planned: " + accessorRenames.size());
 
-        inst.addTransformer(new RuntimeRemapper(modClassNames, methodMap, fieldMap), true);
-        inst.addTransformer(new MixinAnnotationPatcher(modClassNames), true);
+        inst.addTransformer(new MinecraftBootstrapTransformer(mappings, runtimeEnvironment), true);
+        inst.addTransformer(new MixinAnnotationPatcher(modClassNames, mappings, runtimeEnvironment::get), true);
+        inst.addTransformer(new RuntimeRemapper(modClassNames, mappings, runtimeEnvironment::get), true);
         inst.addTransformer(new EventConstructorPatcher(modClassNames), true);
         inst.addTransformer(new AccessorConflictPatcher(modClassNames, accessorRenames), true);
         System.out.println("[Mod-Agent] Transformers registered.");
@@ -173,8 +179,8 @@ public class AgentBootstrap {
                             }
                             try (InputStream is = jf.getInputStream(classEntry)) {
                                 byte[] original  = is.readAllBytes();
-                                byte[] processed = prePatchMixinClass(original, methodMap, fieldMap, accessorRenames);
-                                Path   outPath   = patchDir.resolve(classPath);
+                                byte[] processed = prePatchMixinClass(
+                                        original, mappings, runtimeEnvironment.get(), modClassNames, accessorRenames, mixinLoader);                                Path   outPath   = patchDir.resolve(classPath);
                                 Files.createDirectories(outPath.getParent());
                                 Files.write(outPath, processed);
                                 System.out.println("[Mod-Agent] Pre-patched mixin class: " + classPath);
@@ -202,8 +208,8 @@ public class AgentBootstrap {
                             if (classEntry == null) continue;
                             try (InputStream is = jf.getInputStream(classEntry)) {
                                 byte[] original  = is.readAllBytes();
-                                byte[] processed = prePatchMixinClass(original, methodMap, fieldMap, accessorRenames);
-                                Path   outPath   = patchDir.resolve(classPath2);
+                                byte[] processed = prePatchMixinClass(
+                                        original, mappings, runtimeEnvironment.get(), modClassNames, accessorRenames, mixinLoader);                                Path   outPath   = patchDir.resolve(classPath2);
                                 Files.createDirectories(outPath.getParent());
                                 Files.write(outPath, processed);
                                 System.out.println("[Mod-Agent] Pre-patched accessor interface: " + classPath2);
@@ -266,48 +272,27 @@ public class AgentBootstrap {
         mixinRegistrar.start();
     }
 
-    // Applies SRG→MCP rename + accessor value injection + accessor renames +
-    // mixin annotation fixes to a raw mixin class byte array.
-    // All steps must happen here because Mixin reads these bytes directly via
-    // getResourceAsStream — they never go through ClassFileTransformer.
     private static byte[] prePatchMixinClass(byte[] bytes,
-                                             Map<String, String> methodMap,
-                                             Map<String, String> fieldMap,
-                                             Map<String, String> accessorRenames) {
-        // 1. SRG→MCP remap: translate func_/field_ names before anything else
-        if (containsSrgNames(bytes)) {
-            ClassReader cr = new ClassReader(bytes);
-            ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-            cr.accept(new ClassRemapper(cw, new Remapper() {
-                @Override public String mapMethodName(String owner, String name, String desc) {
-                    String m = methodMap.get(name); return m != null ? m : name;
-                }
-                @Override public String mapFieldName(String owner, String name, String desc) {
-                    String f = fieldMap.get(name); return f != null ? f : name;
-                }
-            }), 0);
-            bytes = cw.toByteArray();
-        }
+                                             MappingRegistry mappings,
+                                             Environment runtimeEnvironment,
+                                             Set<String> modClassNames,
+                                             Map<String, String> accessorRenames,
+                                             ClassLoader loader) {
+        bytes = RuntimeRemapper.remapBytes(
+                bytes,
+                mappings,
+                runtimeEnvironment,
+                modClassNames,
+                loader
+        );
 
-        // 2. Inject explicit value= into @Accessor/@Invoker annotations BEFORE renaming.
-        //    This locks in the actual Minecraft field/method target name while the method
-        //    name still matches what Mixin would inflect from. After renaming the method
-        //    (e.g. getCurBlockDamageMP → getCurBlockDamageMP_raven) Mixin would try to
-        //    inflect "curBlockDamageMP_raven" as the field name, which doesn't exist.
-        //    With the explicit value already set, Mixin ignores the method name entirely
-        //    and goes straight to the value.
         bytes = injectExplicitAccessorValues(bytes);
 
-        // 3. Rename accessor methods to avoid clashing with Lunar's own accessor methods
         if (!accessorRenames.isEmpty()) {
             bytes = AccessorConflictPatcher.applyRenames(bytes, accessorRenames);
         }
 
-        // 4. Apply mixin annotation fixes (remap=false, priority clamping).
-        //    MixinAnnotationPatcher is a ClassFileTransformer and never fires on mixin
-        //    classes because Mixin reads them via getResourceAsStream, not the classloader.
-        bytes = applyMixinAnnotationFixes(bytes);
-
+        bytes = MixinAnnotationPatcher.apply(bytes, mappings, runtimeEnvironment);
         return bytes;
     }
 
@@ -407,73 +392,6 @@ public class AgentBootstrap {
         }
         return null;
     }
-
-
-    private static final String MIXIN_DESC    = "Lorg/spongepowered/asm/mixin/Mixin;";
-    private static final int    MAX_PRIORITY  = 100;
-
-    /**
-     * Inline equivalent of MixinAnnotationPatcher for the pre-patch step.
-     * Forces remap=false and clamps @Mixin priority to MAX_PRIORITY on the class annotation.
-     */
-    private static byte[] applyMixinAnnotationFixes(byte[] bytes) {
-        // Quick check: skip if no @Mixin annotation present.
-        boolean hasMixin = false;
-        try {
-            ClassReader cr = new ClassReader(bytes);
-            boolean[] found = {false};
-            cr.accept(new ClassVisitor(Opcodes.ASM9) {
-                @Override
-                public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                    if (MIXIN_DESC.equals(desc)) found[0] = true;
-                    return null;
-                }
-            }, ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES);
-            hasMixin = found[0];
-        } catch (Exception e) { return bytes; }
-
-        if (!hasMixin) return bytes;
-
-        try {
-            ClassReader  cr = new ClassReader(bytes);
-            ClassWriter  cw = new ClassWriter(cr, 0);
-            cr.accept(new ClassVisitor(Opcodes.ASM9, cw) {
-                @Override
-                public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
-                    AnnotationVisitor av = super.visitAnnotation(desc, visible);
-                    if (!MIXIN_DESC.equals(desc)) return av;
-                    // Wrap to force remap=false and clamp priority.
-                    return new AnnotationVisitor(Opcodes.ASM9, av) {
-                        boolean sawRemap = false, sawPriority = false;
-                        @Override
-                        public void visit(String name, Object value) {
-                            if ("remap".equals(name))    { sawRemap = true;    super.visit(name, false); return; }
-                            if ("priority".equals(name)) {
-                                sawPriority = true;
-                                int p = (int) value;
-                                if (p > MAX_PRIORITY)
-                                    System.out.println("[Mod-Agent] Pre-patch: clamping mixin priority " + p + " → " + MAX_PRIORITY);
-                                super.visit(name, Math.min(p, MAX_PRIORITY));
-                                return;
-                            }
-                            super.visit(name, value);
-                        }
-                        @Override
-                        public void visitEnd() {
-                            if (!sawRemap)    super.visit("remap",    false);
-                            if (!sawPriority) super.visit("priority", MAX_PRIORITY);
-                            super.visitEnd();
-                        }
-                    };
-                }
-            }, 0);
-            return cw.toByteArray();
-        } catch (Exception e) {
-            System.out.println("[Mod-Agent] Failed to apply mixin annotation fixes: " + e);
-            return bytes;
-        }
-    }
-
 
     // Parses the mixin JSON from inside the JAR to get the full list of mixin class resource paths.
     private static List<String> resolveMixinClassPaths(JarFile jf, String mixinJsonName) {
@@ -581,16 +499,6 @@ public class AgentBootstrap {
         return r;
     }
 
-    private static boolean containsSrgNames(byte[] bytes) {
-        for (int i = 0; i < bytes.length - 6; i++) {
-            if (bytes[i] == 'f') {
-                if (bytes[i+1]=='u' && bytes[i+2]=='n' && bytes[i+3]=='c' && bytes[i+4]=='_') return true;
-                if (bytes[i+1]=='i' && bytes[i+2]=='e' && bytes[i+3]=='l' && bytes[i+4]=='d' && bytes[i+5]=='_') return true;
-            }
-        }
-        return false;
-    }
-
     private static boolean containsUtf8(byte[] bytes, String needle) {
         byte[] n = needle.getBytes(StandardCharsets.UTF_8);
         outer:
@@ -607,32 +515,118 @@ public class AgentBootstrap {
         premain(args, inst);
     }
 
-    static void loadMappings(Map<String, String> methodMap, Map<String, String> fieldMap) {
-        parseMappingCsv("/mappings/methods.csv", methodMap);
-        parseMappingCsv("/mappings/fields.csv",  fieldMap);
-        System.out.println("[Mod-Agent] Loaded " + methodMap.size() + " method mappings, "
-                + fieldMap.size() + " field mappings.");
-    }
+    public static void bootstrapLoadedMods(ClassLoader parentLoader) {
+        synchronized (AgentBootstrap.class) {
+            if (Boolean.getBoolean(BOOTSTRAPPED_PROPERTY)) return;
+            System.setProperty(BOOTSTRAPPED_PROPERTY, "true");
+        }
 
-    private static void parseMappingCsv(String resource, Map<String, String> target) {
-        try (InputStream is = AgentBootstrap.class.getResourceAsStream(resource)) {
-            if (is == null) {
-                System.out.println("[Mod-Agent] Mappings not found: " + resource
-                        + " — SRG→MCP remapping will not work!");
-                return;
+        String modList = System.getProperty(MOD_LIST_PROPERTY);
+        if (modList == null || modList.isBlank()) {
+            System.out.println("[Mod-Agent] No mods to bootstrap.");
+            return;
+        }
+
+        System.out.println("[Mod-Agent] Minecraft startGame reached, bootstrapping mods...");
+
+        ClassLoader modLoader = buildModLoader(parentLoader);
+        File configDir = deriveConfigDir();
+
+        for (String entry : modList.split(",")) {
+            String[] parts = entry.split("\\|", -1);
+            if (parts.length < 1 || parts[0].isBlank()) continue;
+
+            String className = parts[0];
+            String property = parts.length > 1 ? parts[1] : "";
+
+            try {
+                initMod(className, property, modLoader, configDir);
+            } catch (Throwable t) {
+                System.out.println("[Mod-Agent] Failed to init mod: " + className + " -- " + t);
+                t.printStackTrace();
             }
-            BufferedReader r = new BufferedReader(new InputStreamReader(is));
-            r.readLine(); // skip header
-            String line;
-            while ((line = r.readLine()) != null) {
-                String[] parts = line.split(",");
-                if (parts.length >= 2) target.put(parts[0].trim(), parts[1].trim());
-            }
-        } catch (Exception e) {
-            System.out.println("[Mod-Agent] Failed to load mappings " + resource + ": " + e);
         }
     }
 
+    private static ClassLoader buildModLoader(ClassLoader parent) {
+        System.out.println("[Mod-Agent] buildModLoader called, jarPaths: "
+                + System.getProperty(JAR_PATHS_PROPERTY));
+        String jarPathsProp = System.getProperty(JAR_PATHS_PROPERTY);
+        if (jarPathsProp == null || jarPathsProp.isBlank()) {
+            System.out.println("[Mod-Agent] No JAR paths registered, mod loading will fail.");
+            return parent;
+        }
+
+        try {
+            String[] paths = jarPathsProp.split("::");
+            URL[] urls = new URL[paths.length];
+            for (int i = 0; i < paths.length; i++) {
+                urls[i] = new File(paths[i]).toURI().toURL();
+                System.out.println("[Mod-Agent] Mod loader URL: " + urls[i]);
+            }
+            return new URLClassLoader(urls, parent);
+        } catch (Exception e) {
+            System.out.println("[Mod-Agent] Failed to build mod loader: " + e);
+            return parent;
+        }
+    }
+
+    private static File deriveConfigDir() {
+        String jarPaths = System.getProperty(JAR_PATHS_PROPERTY);
+        if (jarPaths != null && !jarPaths.isBlank()) {
+            File parent = new File(jarPaths.split("::")[0]).getParentFile();
+            if (parent != null) {
+                File cfg = new File(parent, "config");
+                //noinspection ResultOfMethodCallIgnored
+                cfg.mkdirs();
+                return cfg;
+            }
+        }
+        File fallback = new File(System.getProperty("user.home"),
+                ".lunarclient" + File.separator + "offline"
+                        + File.separator + "multiver" + File.separator + "config");
+        //noinspection ResultOfMethodCallIgnored
+        fallback.mkdirs();
+        return fallback;
+    }
+
+    private static void initMod(String className, String property,
+                                ClassLoader modLoader, File configDir) throws Exception {
+        if (!property.isBlank() && !Boolean.getBoolean(property)) {
+            System.out.println("[Mod-Agent] Skipping " + className
+                    + ", property guard not set: " + property);
+            return;
+        }
+
+        String dotName = className.replace('/', '.');
+        Class<?> modClass = Class.forName(dotName, true, modLoader);
+        System.out.println("[Mod-Agent] Loaded: " + dotName + " via " + modClass.getClassLoader());
+
+        Object instance = modClass.getDeclaredConstructor().newInstance();
+        System.out.println("[Mod-Agent] Instantiated: " + dotName);
+
+        ModLifecycleInvoker.invokeLifecycle(instance, configDir, modLoader);
+    }
+
+    static MappingRegistry loadMappings() {
+        String resource = "/mappings/combined.csv";
+        try (InputStream is = AgentBootstrap.class.getResourceAsStream(resource)) {
+            if (is == null) {
+                System.out.println("[Mod-Agent] Mappings not found: " + resource
+                        + " -- runtime remapping will not work!");
+                return new MappingRegistry();
+            }
+            MappingRegistry mappings = MappingRegistry.load(is);
+            System.out.println("[Mod-Agent] Loaded combined mappings: "
+                    + mappings.classCount() + " classes, "
+                    + mappings.methodCount() + " methods, "
+                    + mappings.fieldCount() + " fields.");
+            return mappings;
+        } catch (Exception e) {
+            System.out.println("[Mod-Agent] Failed to load mappings " + resource + ": " + e);
+            return new MappingRegistry();
+        }
+    }
 
     private static String buildModListProperty(List<ModEntry> mods) {
         StringBuilder sb = new StringBuilder();

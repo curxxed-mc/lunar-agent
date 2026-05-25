@@ -1,32 +1,38 @@
 package net.curxxed.dev.agent.transformer;
 
-import org.objectweb.asm.*;
+import net.curxxed.dev.agent.mappings.MappingRegistry;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
 
+import java.io.InputStream;
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
-import java.util.Map;
+import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Supplier;
 
-// Translates SRG names (func_XXXXX_x, field_XXXXX_x) to MCP names at class load time.
-// This fires via ClassFileTransformer for normal mod classes (everything except mixin classes,
-// which Mixin reads via getResourceAsStream and which are pre-patched by AgentBootstrap instead).
+// Translates mod bytecode from any known mapping namespace (obf, SRG, MCP)
+// into the namespace used by the current runtime.
 public class RuntimeRemapper implements ClassFileTransformer {
 
-    private final Map<String, String> methodMap;
-    private final Map<String, String> fieldMap;
+    private final MappingRegistry mappings;
+    private final Supplier<Environment> environmentSupplier;
     private final Set<String> modClassNames;
 
-    // Maps are pre-loaded by AgentBootstrap so the CSV files are only parsed once.
     public RuntimeRemapper(Set<String> modClassNames,
-                           Map<String, String> methodMap,
-                           Map<String, String> fieldMap) {
+                           MappingRegistry mappings,
+                           Supplier<Environment> environmentSupplier) {
         this.modClassNames = modClassNames;
-        this.methodMap     = methodMap;
-        this.fieldMap      = fieldMap;
+        this.mappings = mappings;
+        this.environmentSupplier = environmentSupplier;
         System.out.println("[Mod-Agent] RuntimeRemapper ready: "
-                + methodMap.size() + " method mappings, " + fieldMap.size() + " field mappings.");
+                + mappings.classCount() + " classes, "
+                + mappings.methodCount() + " methods, "
+                + mappings.fieldCount() + " fields.");
     }
 
     @Override
@@ -34,39 +40,144 @@ public class RuntimeRemapper implements ClassFileTransformer {
                             ProtectionDomain domain, byte[] classfileBuffer) {
         if (className == null || !modClassNames.contains(className)) return null;
 
-        // Scan raw bytes for func_/field_ before doing a full ASM pass.
-        // Most mod classes won't have SRG names if they were built with dev mappings.
-        if (!containsSrgNames(classfileBuffer)) return null;
+        Environment environment = environmentSupplier.get();
+        byte[] remapped = remapBytes(classfileBuffer, mappings, environment, modClassNames, loader);
+        if (remapped == classfileBuffer) return null;
 
-        ClassReader cr = new ClassReader(classfileBuffer);
-
-        // COMPUTE_MAXS not COMPUTE_FRAMES: SRG→MCP only renames methods and fields.
-        // Class names and descriptors don't change, so existing stack frames are still valid.
-        // COMPUTE_FRAMES triggers getCommonSuperClass, which fails on unloaded Minecraft classes.
-        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
-        cr.accept(new ClassRemapper(cw, new SrgRemapper()), 0);
-
-        byte[] remapped = cw.toByteArray();
-        System.out.println("[Mod-Agent] Remapped SRG->MCP: " + className);
+        System.out.println("[Mod-Agent] Remapped " + className + " -> " + environment + " runtime names");
         return remapped;
     }
 
-    private boolean containsSrgNames(byte[] bytes) {
-        for (int i = 0; i < bytes.length - 6; i++) {
-            if (bytes[i] == 'f') {
-                if (bytes[i+1]=='u' && bytes[i+2]=='n' && bytes[i+3]=='c' && bytes[i+4]=='_') return true;
-                if (bytes[i+1]=='i' && bytes[i+2]=='e' && bytes[i+3]=='l' && bytes[i+4]=='d' && bytes[i+5]=='_') return true;
-            }
-        }
-        return false;
+    public static byte[] remapBytes(byte[] bytes,
+                                    MappingRegistry mappings,
+                                    Environment environment,
+                                    Set<String> protectedClassNames,
+                                    ClassLoader loader) {
+        ClassReader cr = new ClassReader(bytes);
+        ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+        NamespaceRemapper remapper = new NamespaceRemapper(
+                loader, mappings, environment.namespace(), protectedClassNames);
+        cr.accept(new ClassRemapper(cw, remapper), 0);
+        return remapper.changed() ? cw.toByteArray() : bytes;
     }
 
-    private class SrgRemapper extends Remapper {
-        @Override public String mapMethodName(String owner, String name, String descriptor) {
-            String m = methodMap.get(name); return m != null ? m : name;
+    private static class NamespaceRemapper extends Remapper {
+        private final ClassLoader loader;
+        private final MappingRegistry mappings;
+        private final MappingRegistry.Namespace targetNamespace;
+        private final Set<String> protectedClassNames;
+
+        // Tracks classes whose superclass chain has already been seeded into the registry
+        // so we only pay the getResourceAsStream cost once per unique owner class.
+        private final Set<String> seededClasses = new HashSet<>();
+
+        private boolean changed;
+
+        NamespaceRemapper(ClassLoader loader,
+                          MappingRegistry mappings,
+                          MappingRegistry.Namespace targetNamespace,
+                          Set<String> protectedClassNames) {
+            this.loader = loader;
+            this.mappings = mappings;
+            this.targetNamespace = targetNamespace;
+            this.protectedClassNames = protectedClassNames;
         }
-        @Override public String mapFieldName(String owner, String name, String descriptor) {
-            String f = fieldMap.get(name); return f != null ? f : name;
+
+        boolean changed() {
+            return changed;
+        }
+
+        @Override
+        public String map(String internalName) {
+            if (internalName == null || protectedClassNames.contains(internalName)) return internalName;
+            String mapped = mappings.mapClass(internalName, targetNamespace);
+            if (!mapped.equals(internalName)) changed = true;
+            return mapped;
+        }
+
+        @Override
+        public String mapMethodName(String owner, String name, String descriptor) {
+            // Best-effort: if the runtime class loader exposes class bytes (not all do —
+            // e.g. Lunar's Genesis loader does not), seed the registry's superClasses map
+            // so findMethod can walk from the call-site owner up to the declaring class.
+            // When this does nothing (bytes unavailable), MappingRegistry falls back to a
+            // direct SRG-name lookup, which is the primary fix for the DynamicTexture case.
+            seedSuperClassChain(owner);
+            String mapped = mappings.mapMethodName(owner, name, descriptor, targetNamespace);
+            if (!mapped.equals(name)) changed = true;
+            return mapped;
+        }
+
+        @Override
+        public String mapFieldName(String owner, String name, String descriptor) {
+            seedSuperClassChain(owner);
+            String mapped = mappings.mapFieldName(owner, name, descriptor, targetNamespace);
+            if (!mapped.equals(name)) changed = true;
+            return mapped;
+        }
+
+        // Walk the runtime class hierarchy rooted at internalName and register every
+        // parent relationship into MappingRegistry.superClasses so that findMethod's
+        // while-loop chain walk can follow them.
+        //
+        // This only helps when the class loader exposes .class resources (e.g. vanilla
+        // Forge/MCP environments). It silently no-ops when bytes are unavailable.
+        // The primary fix for the inherited-method case is in MappingRegistry.findMethod
+        // via the SRG-name direct lookup.
+        private void seedSuperClassChain(String internalName) {
+            if (internalName == null || !seededClasses.add(internalName)) return;
+
+            ClassInfo info = readClassInfo(internalName);
+            if (info == null) return;
+
+            if (info.superName != null && !"java/lang/Object".equals(info.superName)) {
+                mappings.registerSuperClass(internalName, info.superName);
+                seedSuperClassChain(info.superName);
+            }
+            for (String iface : info.interfaces) {
+                mappings.registerSuperClass(internalName, iface);
+                seedSuperClassChain(iface);
+            }
+        }
+
+        private ClassInfo readClassInfo(String internalName) {
+            byte[] bytes = readClassBytes(internalName);
+            if (bytes == null) return null;
+
+            final ClassInfo[] out = {null};
+            ClassReader cr = new ClassReader(bytes);
+            cr.accept(new ClassVisitor(Opcodes.ASM9) {
+                @Override
+                public void visit(int version, int access, String name, String signature,
+                                  String superName, String[] interfaces) {
+                    out[0] = new ClassInfo(superName, interfaces == null ? new String[0] : interfaces);
+                }
+            }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            return out[0];
+        }
+
+        private byte[] readClassBytes(String internalName) {
+            String resource = internalName + ".class";
+            try {
+                InputStream is = loader != null ? loader.getResourceAsStream(resource) : null;
+                if (is == null) is = ClassLoader.getSystemResourceAsStream(resource);
+                if (is == null) return null;
+                try (InputStream in = is) {
+                    return in.readAllBytes();
+                }
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+
+        private static final class ClassInfo {
+            final String superName;
+            final String[] interfaces;
+
+            ClassInfo(String superName, String[] interfaces) {
+                this.superName = superName;
+                this.interfaces = interfaces;
+            }
         }
     }
 }
