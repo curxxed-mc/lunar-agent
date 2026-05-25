@@ -121,6 +121,6 @@ You do not need to do any of the following in your mod source:
 
 **Injections silently do nothing** — Check that `mappings/combined.csv` is present in the agent JAR. If the agent logs `Mappings not found`, remapping isn't running.
 
-**Mixin conflicts with Lunar** — Switch from `@Overwrite` to `@Inject` or `@Redirect` (although not always), or lower the mixin priority below the conflicting mixin.
+**Mixin conflicts with Lunar** — Switch from `@Overwrite` to `@Inject` or `@Redirect` (although not always).
 
 **`agent library failed to init` on startup** — You used `./gradlew jar` instead of `./gradlew shadowJar`. Always use `shadowJar`.
