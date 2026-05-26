@@ -97,11 +97,6 @@ public class RuntimeRemapper implements ClassFileTransformer {
 
         @Override
         public String mapMethodName(String owner, String name, String descriptor) {
-            // Best-effort: if the runtime class loader exposes class bytes (not all do —
-            // e.g. Lunar's Genesis loader does not), seed the registry's superClasses map
-            // so findMethod can walk from the call-site owner up to the declaring class.
-            // When this does nothing (bytes unavailable), MappingRegistry falls back to a
-            // direct SRG-name lookup, which is the primary fix for the DynamicTexture case.
             seedSuperClassChain(owner);
             String mapped = mappings.mapMethodName(owner, name, descriptor, targetNamespace);
             if (!mapped.equals(name)) changed = true;
