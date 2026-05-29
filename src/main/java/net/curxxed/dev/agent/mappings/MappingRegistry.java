@@ -1,7 +1,6 @@
 package net.curxxed.dev.agent.mappings;
 
 import org.objectweb.asm.Type;
-
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -88,11 +87,12 @@ public class MappingRegistry {
         }
 
         public String name(Namespace namespace) {
-            return switch (namespace) {
-                case OBF -> obfName;
-                case SRG -> srgName;
-                case MCP -> mcpName;
-            };
+            switch (namespace) {
+                case OBF: return obfName;
+                case SRG: return srgName;
+                case MCP: return mcpName;
+                default: throw new IllegalArgumentException("Unknown namespace: " + namespace);
+            }
         }
     }
 
@@ -118,11 +118,12 @@ public class MappingRegistry {
         }
 
         public String name(Namespace namespace) {
-            return switch (namespace) {
-                case OBF -> obfName;
-                case SRG -> srgName;
-                case MCP -> mcpName;
-            };
+            switch (namespace) {
+                case OBF: return obfName;
+                case SRG: return srgName;
+                case MCP: return mcpName;
+                default: throw new IllegalArgumentException("Unknown namespace: " + namespace);
+            }
         }
     }
 
@@ -164,19 +165,21 @@ public class MappingRegistry {
         }
 
         public String name(Namespace namespace) {
-            return switch (namespace) {
-                case OBF -> obfName;
-                case SRG -> srgName;
-                case MCP -> mcpName;
-            };
+            switch (namespace) {
+                case OBF: return obfName;
+                case SRG: return srgName;
+                case MCP: return mcpName;
+                default: throw new IllegalArgumentException("Unknown namespace: " + namespace);
+            }
         }
 
         public String desc(Namespace namespace) {
-            return switch (namespace) {
-                case OBF -> obfDesc;
-                case SRG -> srgDesc;
-                case MCP -> mcpDesc;
-            };
+            switch (namespace) {
+                case OBF: return obfName;
+                case SRG: return srgName;
+                case MCP: return mcpName;
+                default: throw new IllegalArgumentException("Unknown namespace: " + namespace);
+            }
         }
     }
 
@@ -572,30 +575,22 @@ public class MappingRegistry {
         return "L" + mappedOwner + ";" + mappedName;
     }
 
-    private Type remapType(Type type,
-                           Namespace targetNamespace) {
+    private Type remapType(Type type, Namespace targetNamespace) {
 
-        return switch (type.getSort()) {
+        switch (type.getSort()) {
+            case Type.ARRAY:
+                final StringBuilder prefix = new StringBuilder();
 
-            case Type.ARRAY ->
-                    Type.getType(
-                            "[".repeat(type.getDimensions())
-                                    + remapType(
-                                    type.getElementType(),
-                                    targetNamespace
-                            ).getDescriptor()
-                    );
+                for (int i = 0; i < type.getDimensions(); i++) {
+                    prefix.append('[');
+                }
 
-            case Type.OBJECT ->
-                    Type.getObjectType(
-                            mapClass(
-                                    type.getInternalName(),
-                                    targetNamespace
-                            )
-                    );
-
-            default -> type;
-        };
+                return Type.getType(prefix + remapType(type.getElementType(), targetNamespace).getDescriptor());
+            case Type.OBJECT:
+                return Type.getObjectType(mapClass(type.getInternalName(), targetNamespace));
+            default:
+                return type;
+        }
     }
 
     private void addClass(ClassMapping mapping) {

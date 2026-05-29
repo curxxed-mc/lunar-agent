@@ -7,8 +7,8 @@ group = "net.curxxed.dev"
 version = "1.0.0"
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
 }
 
 repositories {
@@ -20,15 +20,17 @@ dependencies {
     // ASM — needed at JVM startup so it HAS to be shaded in, not a provided dep
     implementation("org.ow2.asm:asm:9.7")
     implementation("org.ow2.asm:asm-commons:9.7")
-    compileOnly("org.spongepowered:mixin:0.8.7")
+    implementation("org.spongepowered:mixin:0.8.7")
 }
 
 tasks.shadowJar {
     archiveClassifier.set("")
-    archiveFileName.set("lunar-agent-${project.version}.jar")
+    //archiveFileName.set("lunar-agent-${project.version}.jar")
+    archiveFileName.set("lunar-agent.jar") // TODO: This is what my json has it as and im too lazy to change. Also version isn't relevant in this case
 
     // relocate so we don't collide with whatever ASM version lunar/ichor ships with
     relocate("org.objectweb.asm", "net.curxxed.dev.agent.asm")
+    relocate("org.spongepowered.asm", "net.curxxed.dev.agent.mixin_internal")
 
     manifest {
         attributes(

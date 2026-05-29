@@ -1,5 +1,6 @@
 package net.curxxed.dev.agent.transformer;
 
+import net.curxxed.dev.agent.AgentLog;
 import net.curxxed.dev.agent.mappings.MappingRegistry;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -7,7 +8,7 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
-
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
@@ -29,10 +30,7 @@ public class RuntimeRemapper implements ClassFileTransformer {
         this.modClassNames = modClassNames;
         this.mappings = mappings;
         this.environmentSupplier = environmentSupplier;
-        System.out.println("[Mod-Agent] RuntimeRemapper ready: "
-                + mappings.classCount() + " classes, "
-                + mappings.methodCount() + " methods, "
-                + mappings.fieldCount() + " fields.");
+        AgentLog.log("RuntimeRemapper ready: " + mappings.classCount() + " classes, " + mappings.methodCount() + " methods, " + mappings.fieldCount() + " fields.");
     }
 
     @Override
@@ -44,7 +42,7 @@ public class RuntimeRemapper implements ClassFileTransformer {
         byte[] remapped = remapBytes(classfileBuffer, mappings, environment, modClassNames, loader);
         if (remapped == classfileBuffer) return null;
 
-        System.out.println("[Mod-Agent] Remapped " + className + " -> " + environment + " runtime names");
+        AgentLog.log("Remapped " + className + " to " + environment + " runtime names");
         return remapped;
     }
 
@@ -157,9 +155,20 @@ public class RuntimeRemapper implements ClassFileTransformer {
                 InputStream is = loader != null ? loader.getResourceAsStream(resource) : null;
                 if (is == null) is = ClassLoader.getSystemResourceAsStream(resource);
                 if (is == null) return null;
-                try (InputStream in = is) {
-                    return in.readAllBytes();
+
+                try (InputStream in = is;
+                     ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+
+                    byte[] buffer = new byte[4096];
+                    int len;
+
+                    while ((len = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, len);
+                    }
+
+                    return out.toByteArray();
                 }
+
             } catch (Exception ignored) {
                 return null;
             }

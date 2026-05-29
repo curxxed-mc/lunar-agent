@@ -1,5 +1,6 @@
 package net.curxxed.dev.agent.transformer;
 
+import net.curxxed.dev.agent.AgentLog;
 import net.curxxed.dev.agent.mappings.MappingRegistry;
 import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassReader;
@@ -9,15 +10,9 @@ import org.objectweb.asm.FieldVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
-
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.function.Supplier;
 
 // Patches mixin annotations on mod classes at load time so the mod author
@@ -37,14 +32,29 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
     private static final String OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;";
     private static final String AT_DESC = "Lorg/spongepowered/asm/mixin/injection/At;";
 
-    private static final Set<String> REMAP_FALSE_TARGETS = Set.of(
-            SHADOW_DESC, ACCESSOR_DESC, INVOKER_DESC,
-            INJECT_DESC, REDIRECT_DESC, MODIFY_ARG, MODIFY_ARGS,
-            MODIFY_CONST, MODIFY_VAR, OVERWRITE
+    private static final Set<String> REMAP_FALSE_TARGETS = new HashSet<>(
+            Arrays.asList(
+                    SHADOW_DESC,
+                    ACCESSOR_DESC,
+                    INVOKER_DESC,
+                    INJECT_DESC,
+                    REDIRECT_DESC,
+                    MODIFY_ARG,
+                    MODIFY_ARGS,
+                    MODIFY_CONST,
+                    MODIFY_VAR,
+                    OVERWRITE
+            )
     );
 
-    private static final Set<String> METHOD_SELECTOR_ANNOTATIONS = Set.of(
-            INJECT_DESC, REDIRECT_DESC, MODIFY_ARG, MODIFY_ARGS, MODIFY_VAR
+    private static final Set<String> METHOD_SELECTOR_ANNOTATIONS = new HashSet<>(
+            Arrays.asList(
+                    INJECT_DESC,
+                    REDIRECT_DESC,
+                    MODIFY_ARG,
+                    MODIFY_ARGS,
+                    MODIFY_VAR
+            )
     );
 
     private static final int MAX_PRIORITY = 100;
@@ -69,7 +79,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
         byte[] patched = apply(classfileBuffer, mappings, environmentSupplier.get());
         if (patched == classfileBuffer) return null;
 
-        System.out.println("[Mod-Agent] Patched mixin annotations in: " + className);
+        AgentLog.log("Patched mixin annotations in: " + className);
         return patched;
     }
 
@@ -185,7 +195,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
                 String target = mixinTargets.get(0);
                 String mapped = mappings.mapMethodName(target, name, descriptor, targetNamespace);
                 if (!mapped.equals(name)) {
-                    System.out.println("[Mod-Agent] Remapping @Overwrite method: "
+                    AgentLog.log("Remapping @Overwrite method: "
                             + name + " → " + mapped + " (target: " + target + ")");
                     outName = mapped;
                     renamedMethods.put(key, mapped);
@@ -198,7 +208,7 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
                 String target = mixinTargets.get(0);
                 String mapped = mappings.mapMethodName(target, name, descriptor, targetNamespace);
                 if (!mapped.equals(name)) {
-                    System.out.println("[Mod-Agent] Remapping @Shadow method: "
+                    AgentLog.log("Remapping @Shadow method: "
                             + name + " → " + mapped + " (target: " + target + ")");
                     outName = mapped;
                     renamedMethods.put(key, mapped);
@@ -265,13 +275,15 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
                 sawPriority = true;
                 int priority = (int) value;
                 if (priority > MAX_PRIORITY) {
-                    System.out.println("[Mod-Agent] Clamping mixin priority from "
+                    AgentLog.log("Clamping mixin priority from "
                             + priority + " to " + MAX_PRIORITY);
                 }
                 super.visit(name, Math.min(priority, MAX_PRIORITY));
                 return;
             }
-            if ("value".equals(name) && value instanceof Type type) {
+            if ("value".equals(name) && value instanceof Type) {
+                Type type = (Type) value;
+
                 Type mapped = mapTargetType(type);
                 super.visit(name, mapped);
                 return;
@@ -319,13 +331,17 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
 
         @Override
         public void visit(String name, Object value) {
-            if (value instanceof Type type) {
+            if (value instanceof Type) {
+                Type type = (Type) value;
+
                 String mapped = mappings.mapClass(type.getInternalName(), targetNamespace);
                 mixinTargets.add(mapped);
                 super.visit(name, Type.getObjectType(mapped));
                 return;
             }
-            if (value instanceof String target) {
+            if (value instanceof String) {
+                String target = (String) value;
+
                 String mapped = mappings.mapClass(target.replace('.', '/'), targetNamespace);
                 mixinTargets.add(mapped);
                 super.visit(name, mapped.replace('/', '.'));
@@ -364,7 +380,9 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
                 super.visit(name, false);
                 return;
             }
-            if (value instanceof String text) {
+            if (value instanceof String) {
+                String text = (String) value;
+
                 super.visit(name, mapStringValue(name, text));
                 return;
             }
@@ -436,7 +454,9 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
 
         @Override
         public void visit(String name, Object value) {
-            if (value instanceof String selector) {
+            if (value instanceof String) {
+                String selector = (String) value;
+
                 String owner = mixinTargets.isEmpty() ? null : mixinTargets.get(0);
                 super.visit(name, mappings.remapMethodSelector(owner, selector, targetNamespace));
                 return;
@@ -459,7 +479,9 @@ public class MixinAnnotationPatcher implements ClassFileTransformer {
 
         @Override
         public void visit(String name, Object value) {
-            if ("target".equals(name) && value instanceof String reference) {
+            if ("target".equals(name) && value instanceof String) {
+                String reference = (String) value;
+
                 super.visit(name, mappings.remapMemberReference(reference, targetNamespace));
                 return;
             }
