@@ -1,5 +1,6 @@
 package net.curxxed.dev.agent.transformer;
 
+import net.curxxed.dev.agent.AgentLog;
 import org.objectweb.asm.*;
 
 import java.lang.instrument.ClassFileTransformer;
@@ -48,7 +49,7 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
         if (!relevant) return null;
 
         byte[] result = applyRenames(classfileBuffer, renames);
-        System.out.println("[Mod-Agent] AccessorConflictPatcher applied renames in: " + className);
+        AgentLog.log("AccessorConflictPatcher applied renames in: " + className);
         return result;
     }
 
@@ -75,7 +76,7 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
                 String key     = currentOwner + "\n" + name + "\n" + descriptor;
                 String newName = renames.get(key);
                 if (newName != null) {
-                    System.out.println("[Mod-Agent] Renaming accessor declaration: "
+                    AgentLog.log("Renaming accessor declaration: "
                             + name + " → " + newName + " in " + currentOwner);
                     return super.visitMethod(access, newName, descriptor, signature, exceptions);
                 }
@@ -87,7 +88,7 @@ public class AccessorConflictPatcher implements ClassFileTransformer {
                         String callKey    = owner + "\n" + mName + "\n" + descriptor;
                         String mappedName = renames.get(callKey);
                         if (mappedName != null) {
-                            System.out.println("[Mod-Agent] Renaming accessor call site: "
+                            AgentLog.log("Renaming accessor call site: "
                                     + mName + " → " + mappedName + " (owner: " + owner + ")");
                             super.visitMethodInsn(opcode, owner, mappedName, descriptor, isInterface);
                         } else {

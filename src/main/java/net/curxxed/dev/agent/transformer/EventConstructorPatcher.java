@@ -1,7 +1,7 @@
 package net.curxxed.dev.agent.transformer;
 
+import net.curxxed.dev.agent.AgentLog;
 import org.objectweb.asm.*;
-
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
 import java.util.Set;
@@ -54,7 +54,7 @@ public class EventConstructorPatcher implements ClassFileTransformer {
         cr.accept(new NoArgsConstructorInjector(cw, cr.getSuperName()), 0);
 
         byte[] patched = cw.toByteArray();
-        System.out.println("[Mod-Agent] Injected no-args constructor into event: " + className);
+        AgentLog.log("Injected no-args constructor into event: " + className);
         return patched;
     }
 

@@ -1,5 +1,6 @@
 package net.curxxed.dev.agent.transformer;
 
+import net.curxxed.dev.agent.AgentLog;
 import net.curxxed.dev.agent.mappings.MappingRegistry;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -7,7 +8,6 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
-
 import java.lang.instrument.ClassFileTransformer;
 import java.security.ProtectionDomain;
 import java.util.concurrent.atomic.AtomicReference;
@@ -96,13 +96,11 @@ public class MinecraftBootstrapTransformer implements ClassFileTransformer {
         }, 0);
 
         if (!injected[0]) {
-            System.out.println("[Mod-Agent] Could not find Minecraft.startGame for " + environment
-                    + " runtime (" + className + "." + targetMethod + ").");
+            AgentLog.log("Could not find Minecraft.startGame for " + environment + " runtime (" + className + "." + targetMethod + ").");
             return null;
         }
 
-        System.out.println("[Mod-Agent] Injected direct mod bootstrap into "
-                + className + "." + targetMethod + " for " + environment + ".");
+        AgentLog.log("Injected direct mod bootstrap into " + className + "." + targetMethod + " for " + environment + ".");
         return cw.toByteArray();
     }
 }

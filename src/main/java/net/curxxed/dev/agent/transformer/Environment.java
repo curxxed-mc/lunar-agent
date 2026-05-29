@@ -1,11 +1,11 @@
 package net.curxxed.dev.agent.transformer;
 
+import net.curxxed.dev.agent.AgentLog;
 import net.curxxed.dev.agent.mappings.MappingRegistry;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
-
 import java.io.InputStream;
 
 public enum Environment {
@@ -26,7 +26,7 @@ public enum Environment {
     public static Environment detectRuntimeEnvironment() {
         Environment environment = detectFromResources();
         if (environment == null) environment = MCP;
-        System.out.println("[Mod-Agent] Detected initial mapping environment: " + environment);
+        AgentLog.log("Detected initial mapping environment: " + environment);
         return environment;
     }
 
@@ -59,17 +59,17 @@ public enum Environment {
     }
 
     private static Environment detectFromResources() {
-    ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
-    if (hasResource(contextLoader, "ave.class")) return OBF;
-    if (hasResource(contextLoader, "net/minecraft/client/Minecraft.class")) {
-        boolean isLunar = hasResource(contextLoader, "com/moonsworth/lunar/genesis/Genesis.class");
-    if (hasResource(contextLoader, "net/minecraftforge/common/MinecraftForge.class") && !isLunar) {
-           return SRG;
+        ClassLoader contextLoader = Thread.currentThread().getContextClassLoader();
+        if (hasResource(contextLoader, "ave.class")) return OBF;
+        if (hasResource(contextLoader, "net/minecraft/client/Minecraft.class")) {
+            boolean isLunar = hasResource(contextLoader, "com/moonsworth/lunar/genesis/Genesis.class");
+            if (hasResource(contextLoader, "net/minecraftforge/common/MinecraftForge.class") && !isLunar) {
+                return SRG;
+            }
+            return MCP;
         }
-        return MCP;
+        return null;
     }
-    return null;
-}
 
     private static boolean hasResource(ClassLoader loader, String name) {
         try {

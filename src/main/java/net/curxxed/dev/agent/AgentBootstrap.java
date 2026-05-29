@@ -15,9 +15,12 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
-
+import org.spongepowered.asm.launch.MixinBootstrap;
+import org.spongepowered.asm.mixin.MixinEnvironment;
+import org.spongepowered.asm.service.IMixinService;
 import java.io.*;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -45,38 +49,38 @@ public class AgentBootstrap {
                         .forEach(p -> {
                             try {
                                 Files.delete(p);
-                                System.out.println("[Mod-Agent] Deleted bake cache: " + p);
+                                AgentLog.log("Deleted bake cache: " + p);
                             } catch (IOException e) {
-                                System.out.println("[Mod-Agent] Failed to delete bake cache: " + p + " -- " + e);
+                                AgentLog.log("Failed to delete bake cache: " + p + " -- " + e);
                             }
                         });
             }
         } catch (Exception e) {
-            System.out.println("[Mod-Agent] Error clearing bake cache: " + e);
+            AgentLog.log("Error clearing bake cache: " + e);
         }
 
-        System.out.println("[Mod-Agent] premain fired, config: " + args);
+        AgentLog.log("premain fired, config: " + args);
 
         File agentJar = new File(
                 AgentBootstrap.class.getProtectionDomain().getCodeSource().getLocation().toURI()
         );
-        System.out.println("[Mod-Agent] Agent JAR located at: " + agentJar);
+        AgentLog.log("Agent JAR located at: " + agentJar);
 
-        if (args == null || args.isBlank()) {
-            System.out.println("[Mod-Agent] No config file specified, nothing to inject.");
+        if (args == null || args.isEmpty()) {
+            AgentLog.log("No config file specified, nothing to inject.");
             return;
         }
 
         List<ModEntry> mods = parseConfig(args);
         if (mods.isEmpty()) {
-            System.out.println("[Mod-Agent] No mods found in config.");
+            AgentLog.log("No mods found in config.");
             return;
         }
 
         for (ModEntry mod : mods) {
-            if (mod.property() != null && !mod.property().isBlank()) {
-                System.setProperty(mod.property(), "true");
-                System.out.println("[Mod-Agent] Set property: " + mod.property());
+            if (mod.getProperty() != null && !mod.getProperty().isEmpty()) {
+                System.setProperty(mod.getProperty(), "true");
+                AgentLog.log("Set property: " + mod.getProperty());
             }
         }
 
@@ -84,26 +88,28 @@ public class AgentBootstrap {
         // (OptiFine-only etc.) only need their JARs on the classpath and their mixins
         // registered; they don't go through lifecycle initialization.
         String serialized = buildModListProperty(mods);
-        if (!serialized.isBlank()) {
+        if (!serialized.isEmpty()) {
+            AgentLog.log("Setting MOD_LIST_PROPERTY = " + serialized);
             System.setProperty(MOD_LIST_PROPERTY, serialized);
-            System.out.println("[Mod-Agent] Mod list property set: " + serialized);
+            AgentLog.log("Mod list property set: " + serialized);
         }
 
         StringBuilder jarPaths = new StringBuilder();
         for (ModEntry mod : mods) {
-            File f = new File(mod.jar());
+            File f = new File(mod.getJar());
             if (f.exists()) {
-                if (!jarPaths.isEmpty()) jarPaths.append("::");
+                if (jarPaths.length() > 0) jarPaths.append("::");
                 jarPaths.append(f.getAbsolutePath());
             }
         }
-        if (!jarPaths.isEmpty()) {
+
+        if (jarPaths.length() > 0) {
             System.setProperty(JAR_PATHS_PROPERTY, jarPaths.toString());
-            System.out.println("[Mod-Agent] JAR paths property set: " + jarPaths);
+            AgentLog.log("JAR paths property set: " + jarPaths);
         }
 
         Set<String> modClassNames = collectModClassNames(mods);
-        System.out.println("[Mod-Agent] Tracking " + modClassNames.size() + " mod classes for transformation.");
+        AgentLog.log("Tracking " + modClassNames.size() + " mod classes for transformation.");
 
         // Load combined mappings once and share them with RuntimeRemapper, mixin pre-patching,
         // and the direct Minecraft bootstrap transformer.
@@ -115,18 +121,22 @@ public class AgentBootstrap {
         // This must happen before any mod classes are loaded so AccessorConflictPatcher
         // has the full map ready the moment IchorClassLoader asks for the first class.
         Map<String, String> accessorRenames = buildAccessorRenameMap(mods);
-        System.out.println("[Mod-Agent] Accessor renames planned: " + accessorRenames.size());
+        AgentLog.log("Accessor renames planned: " + accessorRenames.size());
 
         inst.addTransformer(new MinecraftBootstrapTransformer(mappings, runtimeEnvironment), true);
         inst.addTransformer(new MixinAnnotationPatcher(modClassNames, mappings, runtimeEnvironment::get), true);
         inst.addTransformer(new RuntimeRemapper(modClassNames, mappings, runtimeEnvironment::get), true);
         inst.addTransformer(new EventConstructorPatcher(modClassNames), true);
         inst.addTransformer(new AccessorConflictPatcher(modClassNames, accessorRenames), true);
-        System.out.println("[Mod-Agent] Transformers registered.");
+        AgentLog.log("Transformers registered.");
+
+        if (shouldBootstrapMixin(inst, runtimeEnvironment.get())) {
+            bootstrapVanillaMixin();
+        }
 
         Thread mixinRegistrar = new Thread(() -> {
             try {
-                System.out.println("[Mod-Agent] Waiting for MixinEnvironment...");
+                AgentLog.log("Waiting for MixinEnvironment...");
                 ClassLoader mixinLoader = null;
 
                 do {
@@ -140,50 +150,53 @@ public class AgentBootstrap {
                     }
                 } while (mixinLoader == null);
 
-                System.out.println("[Mod-Agent] Found Mixin loader: " + mixinLoader.getClass().getName());
+                AgentLog.log("Found Mixin loader: " + mixinLoader.getClass().getName());
 
-                java.lang.reflect.Method addURL    = mixinLoader.getClass().getMethod("addURL", java.net.URL.class);
+                Method addURL = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
+                addURL.setAccessible(true);
+
                 Class<?> mixins  = Class.forName("org.spongepowered.asm.mixin.Mixins", true, mixinLoader);
-                java.lang.reflect.Method addConfig = mixins.getMethod("addConfiguration", String.class);
+                Method addConfig = mixins.getMethod("addConfiguration", String.class);
 
                 Path patchDir = Files.createTempDirectory("agent-mixin-patch-");
                 patchDir.toFile().deleteOnExit();
 
                 for (ModEntry mod : mods) {
-                    if (mod.mixin() == null || mod.mixin().isBlank()) continue;
-                    File jarFile = new File(mod.jar());
+                    if (mod.getMixin() == null || mod.getMixin().isEmpty()) continue;
+                    File jarFile = new File(mod.getJar());
                     if (!jarFile.exists()) continue;
 
                     try (JarFile jf = new JarFile(jarFile)) {
 
                         // 1. Patch the mixin JSON: strip the refmap field
-                        java.util.jar.JarEntry jsonEntry = jf.getJarEntry(mod.mixin());
+                        JarEntry jsonEntry = jf.getJarEntry(mod.getMixin());
                         if (jsonEntry != null) {
                             try (InputStream is = jf.getInputStream(jsonEntry)) {
-                                String json    = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                                String json = new String(toByteArray(is), StandardCharsets.UTF_8);
                                 String patched = stripRefmapField(json);
-                                Files.writeString(patchDir.resolve(mod.mixin()), patched, StandardCharsets.UTF_8);
-                                System.out.println("[Mod-Agent] Stripped refmap from mixin config: " + mod.mixin());
+                                Files.write(patchDir.resolve(mod.getMixin()), patched.getBytes(StandardCharsets.UTF_8));
+                                AgentLog.log("Stripped refmap from mixin config: " + mod.getMixin());
                             }
                         } else {
-                            System.out.println("[Mod-Agent] Mixin JSON not found in JAR: " + mod.mixin());
+                            AgentLog.log("Mixin JSON not found in JAR: " + mod.getMixin());
                         }
 
                         // 2. Pre-remap every class listed in the mixin JSON
-                        List<String> classPaths = resolveMixinClassPaths(jf, mod.mixin());
+                        List<String> classPaths = resolveMixinClassPaths(jf, mod.getMixin());
                         for (String classPath : classPaths) {
                             java.util.jar.JarEntry classEntry = jf.getJarEntry(classPath);
                             if (classEntry == null) {
-                                System.out.println("[Mod-Agent] Mixin class not found in JAR: " + classPath);
+                                AgentLog.log("Mixin class not found in JAR: " + classPath);
                                 continue;
                             }
                             try (InputStream is = jf.getInputStream(classEntry)) {
-                                byte[] original  = is.readAllBytes();
+                                byte[] original = toByteArray(is);
                                 byte[] processed = prePatchMixinClass(
-                                        original, mappings, runtimeEnvironment.get(), modClassNames, accessorRenames, mixinLoader);                                Path   outPath   = patchDir.resolve(classPath);
+                                        original, mappings, runtimeEnvironment.get(), modClassNames, accessorRenames, mixinLoader);
+                                Path outPath = patchDir.resolve(classPath);
                                 Files.createDirectories(outPath.getParent());
                                 Files.write(outPath, processed);
-                                System.out.println("[Mod-Agent] Pre-patched mixin class: " + classPath);
+                                AgentLog.log("Pre-patched mixin class: " + classPath);
                             }
                         }
 
@@ -207,30 +220,30 @@ public class AgentBootstrap {
                             java.util.jar.JarEntry classEntry = jf.getJarEntry(classPath2);
                             if (classEntry == null) continue;
                             try (InputStream is = jf.getInputStream(classEntry)) {
-                                byte[] original  = is.readAllBytes();
-                                byte[] processed = prePatchMixinClass(
-                                        original, mappings, runtimeEnvironment.get(), modClassNames, accessorRenames, mixinLoader);                                Path   outPath   = patchDir.resolve(classPath2);
+                                byte[] original  = toByteArray(is);
+                                byte[] processed = prePatchMixinClass(original, mappings, runtimeEnvironment.get(), modClassNames, accessorRenames, mixinLoader);
+                                Path outPath = patchDir.resolve(classPath2);
                                 Files.createDirectories(outPath.getParent());
                                 Files.write(outPath, processed);
-                                System.out.println("[Mod-Agent] Pre-patched accessor interface: " + classPath2);
+                                AgentLog.log("Pre-patched accessor interface: " + classPath2);
                             } catch (Exception e2) {
-                                System.out.println("[Mod-Agent] Failed to pre-patch accessor: " + classPath2 + " -- " + e2);
+                                AgentLog.log("Failed to pre-patch accessor: " + classPath2 + " -- " + e2);
                             }
                         }
 
                     } catch (IOException e) {
-                        System.out.println("[Mod-Agent] Failed to pre-patch mod: " + mod.jar() + " -- " + e);
+                        AgentLog.log("Failed to pre-patch mod: " + mod.getJar() + " -- " + e);
                     }
                 }
 
                 // Defensively patch the agent's own bootstrap mixin JSON too
                 try (JarFile agentJf = new JarFile(agentJar)) {
-                    java.util.jar.JarEntry e = agentJf.getJarEntry("mixins.agent.json");
+                    JarEntry e = agentJf.getJarEntry("mixins.agent.json");
                     if (e != null) {
                         try (InputStream is = agentJf.getInputStream(e)) {
-                            String json    = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                            String json = new String(toByteArray(is), StandardCharsets.UTF_8);
                             String patched = stripRefmapField(json);
-                            Files.writeString(patchDir.resolve("mixins.agent.json"), patched, StandardCharsets.UTF_8);
+                            Files.write(patchDir.resolve("mixins.agent.json"), patched.getBytes(StandardCharsets.UTF_8));
                         }
                     }
                 } catch (Exception ignored) {}
@@ -238,33 +251,38 @@ public class AgentBootstrap {
                 // patchDir goes in FIRST so IchorClassLoader finds our pre-patched .class
                 // and .json files before seeing the originals inside the mod JARs.
                 addURL.invoke(mixinLoader, patchDir.toUri().toURL());
-                System.out.println("[Mod-Agent] Pre-patch dir added first to IchorClassLoader: " + patchDir);
+                AgentLog.log("Pre-patch dir added first to IchorClassLoader: " + patchDir);
 
                 addURL.invoke(mixinLoader, agentJar.toURI().toURL());
-                System.out.println("[Mod-Agent] Agent JAR added to IchorClassLoader.");
+                AgentLog.log("Agent JAR added to IchorClassLoader.");
 
                 for (ModEntry mod : mods) {
-                    File jarFile = new File(mod.jar());
+                    File jarFile = new File(mod.getJar());
                     if (!jarFile.exists()) {
-                        System.out.println("[Mod-Agent] JAR not found, skipping: " + mod.jar());
+                        AgentLog.log("JAR not found, skipping: " + mod.getJar());
                         continue;
                     }
                     addURL.invoke(mixinLoader, jarFile.toURI().toURL());
-                    System.out.println("[Mod-Agent] Mod JAR added to IchorClassLoader: " + jarFile.getName());
+                    AgentLog.log("Mod JAR added to IchorClassLoader: " + jarFile.getName());
                 }
 
-                addConfig.invoke(null, "mixins.agent.json");
-                System.out.println("[Mod-Agent] Agent bootstrap mixin registered.");
+                // TODO: This is NOT supposed to fail, but we continue anyways
+                try {
+                    addConfig.invoke(null, "mixins.agent.json");
+                    AgentLog.log("Agent bootstrap mixin registered.");
+                } catch (Throwable t) {
+                    AgentLog.log("Agent mixin bootstrap failed, continuing: " + t);
+                }
 
                 for (ModEntry mod : mods) {
-                    if (mod.mixin() != null && !mod.mixin().isBlank()) {
-                        addConfig.invoke(null, mod.mixin());
-                        System.out.println("[Mod-Agent] Mixin config registered: " + mod.mixin());
+                    if (mod.getMixin() != null && !mod.getMixin().isEmpty()) {
+                        addConfig.invoke(null, mod.getMixin());
+                        AgentLog.log("Mixin config registered: " + mod.getMixin());
                     }
                 }
 
             } catch (Exception e) {
-                System.out.println("[Mod-Agent] Error in mixin registrar: " + e);
+                AgentLog.log("Error in mixin registrar: " + e);
                 e.printStackTrace();
             }
         });
@@ -322,15 +340,13 @@ public class AgentBootstrap {
                         if (ACCESSOR.equals(desc)) {
                             String target = inflectAccessor(name);
                             if (target != null) {
-                                System.out.println("[Mod-Agent] Injecting @Accessor value=\""
-                                        + target + "\" for method: " + name);
+                                AgentLog.log("Injecting @Accessor value=\"" + target + "\" for method: " + name);
                                 return new ValueInjectingAnnotationVisitor(av, target);
                             }
                         } else if (INVOKER.equals(desc)) {
                             String target = inflectInvoker(name);
                             if (target != null) {
-                                System.out.println("[Mod-Agent] Injecting @Invoker value=\""
-                                        + target + "\" for method: " + name);
+                                AgentLog.log("Injecting @Invoker value=\"" + target + "\" for method: " + name);
                                 return new ValueInjectingAnnotationVisitor(av, target);
                             }
                         }
@@ -399,7 +415,7 @@ public class AgentBootstrap {
         java.util.jar.JarEntry entry = jf.getJarEntry(mixinJsonName);
         if (entry == null) return result;
         try (InputStream is = jf.getInputStream(entry)) {
-            String json    = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            String json    = new String(toByteArray(is), StandardCharsets.UTF_8);
             String pkg     = extractJsonString(json, "package");
             String pkgPath = (pkg != null) ? pkg.replace('.', '/') : "";
             for (String arrayKey : new String[]{"mixins", "client", "server"}) {
@@ -411,7 +427,7 @@ public class AgentBootstrap {
                 }
             }
         } catch (IOException e) {
-            System.out.println("[Mod-Agent] Failed to resolve mixin class paths from: " + mixinJsonName + " -- " + e);
+            AgentLog.log("Failed to resolve mixin class paths from: " + mixinJsonName + " -- " + e);
         }
         return result;
     }
@@ -425,15 +441,15 @@ public class AgentBootstrap {
         final String MIXIN    = "Lorg/spongepowered/asm/mixin/Mixin;";
 
         for (ModEntry mod : mods) {
-            File f = new File(mod.jar());
+            File f = new File(mod.getJar());
             if (!f.exists()) continue;
-            String prefix = deriveModPrefix(mod.mixin());
+            String prefix = deriveModPrefix(mod.getMixin());
 
             try (JarFile jf = new JarFile(f)) {
                 for (java.util.jar.JarEntry entry : Collections.list(jf.entries())) {
                     if (!entry.getName().endsWith(".class")) continue;
                     try (InputStream is = jf.getInputStream(entry)) {
-                        byte[] bytes       = is.readAllBytes();
+                        byte[] bytes       = toByteArray(is);
                         String internalName = entry.getName().replace(".class", "");
                         org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
                         boolean[] isMixin = {false};
@@ -463,7 +479,7 @@ public class AgentBootstrap {
 
                                         String interfaceKey = internalName + "\n" + name + "\n" + descriptor;
                                         renames.put(interfaceKey, newName);
-                                        System.out.println("[Mod-Agent] Accessor rename planned: "
+                                        AgentLog.log("Accessor rename planned: "
                                                 + name + " → " + newName + " in " + internalName);
 
                                         return null;
@@ -475,7 +491,7 @@ public class AgentBootstrap {
                     } catch (Exception ignored) { /* single class scan failure is not fatal */ }
                 }
             } catch (IOException e) {
-                System.out.println("[Mod-Agent] Failed to scan JAR for accessors: " + mod.jar() + " -- " + e);
+                AgentLog.log("Failed to scan JAR for accessors: " + mod.getJar() + " -- " + e);
             }
         }
         return renames;
@@ -483,7 +499,7 @@ public class AgentBootstrap {
 
 
     static String deriveModPrefix(String mixinConfig) {
-        if (mixinConfig == null || mixinConfig.isBlank()) return "mod";
+        if (mixinConfig == null || mixinConfig.isEmpty()) return "mod";
         String s = mixinConfig;
         if (s.startsWith("mixins.")) s = s.substring("mixins.".length());
         if (s.endsWith(".json"))     s = s.substring(0, s.length() - ".json".length());
@@ -522,19 +538,20 @@ public class AgentBootstrap {
         }
 
         String modList = System.getProperty(MOD_LIST_PROPERTY);
-        if (modList == null || modList.isBlank()) {
-            System.out.println("[Mod-Agent] No mods to bootstrap.");
+        AgentLog.log("bootstrap property = " + System.getProperty(MOD_LIST_PROPERTY));
+        if (modList == null || modList.isEmpty()) {
+            AgentLog.log("No mods to bootstrap.");
             return;
         }
 
-        System.out.println("[Mod-Agent] Minecraft startGame reached, bootstrapping mods...");
+        AgentLog.log("Minecraft startGame reached, bootstrapping mods...");
 
         ClassLoader modLoader = buildModLoader(parentLoader);
         File configDir = deriveConfigDir();
 
         for (String entry : modList.split(",")) {
             String[] parts = entry.split("\\|", -1);
-            if (parts.length < 1 || parts[0].isBlank()) continue;
+            if (parts.length < 1 || parts[0].isEmpty()) continue;
 
             String className = parts[0];
             String property = parts.length > 1 ? parts[1] : "";
@@ -542,18 +559,18 @@ public class AgentBootstrap {
             try {
                 initMod(className, property, modLoader, configDir);
             } catch (Throwable t) {
-                System.out.println("[Mod-Agent] Failed to init mod: " + className + " -- " + t);
+                AgentLog.log("Failed to init mod: " + className + " -- " + t);
                 t.printStackTrace();
             }
         }
     }
 
     private static ClassLoader buildModLoader(ClassLoader parent) {
-        System.out.println("[Mod-Agent] buildModLoader called, jarPaths: "
+        AgentLog.log("buildModLoader called, jarPaths: "
                 + System.getProperty(JAR_PATHS_PROPERTY));
         String jarPathsProp = System.getProperty(JAR_PATHS_PROPERTY);
-        if (jarPathsProp == null || jarPathsProp.isBlank()) {
-            System.out.println("[Mod-Agent] No JAR paths registered, mod loading will fail.");
+        if (jarPathsProp == null || jarPathsProp.isEmpty()) {
+            AgentLog.log("No JAR paths registered, mod loading will fail.");
             return parent;
         }
 
@@ -562,18 +579,18 @@ public class AgentBootstrap {
             URL[] urls = new URL[paths.length];
             for (int i = 0; i < paths.length; i++) {
                 urls[i] = new File(paths[i]).toURI().toURL();
-                System.out.println("[Mod-Agent] Mod loader URL: " + urls[i]);
+                AgentLog.log("Mod loader URL: " + urls[i]);
             }
             return new URLClassLoader(urls, parent);
         } catch (Exception e) {
-            System.out.println("[Mod-Agent] Failed to build mod loader: " + e);
+            AgentLog.log("Failed to build mod loader: " + e);
             return parent;
         }
     }
 
     private static File deriveConfigDir() {
         String jarPaths = System.getProperty(JAR_PATHS_PROPERTY);
-        if (jarPaths != null && !jarPaths.isBlank()) {
+        if (jarPaths != null && !jarPaths.isEmpty()) {
             File parent = new File(jarPaths.split("::")[0]).getParentFile();
             if (parent != null) {
                 File cfg = new File(parent, "config");
@@ -592,18 +609,18 @@ public class AgentBootstrap {
 
     private static void initMod(String className, String property,
                                 ClassLoader modLoader, File configDir) throws Exception {
-        if (!property.isBlank() && !Boolean.getBoolean(property)) {
-            System.out.println("[Mod-Agent] Skipping " + className
+        if (!property.isEmpty() && !Boolean.getBoolean(property)) {
+            AgentLog.log("Skipping " + className
                     + ", property guard not set: " + property);
             return;
         }
 
         String dotName = className.replace('/', '.');
         Class<?> modClass = Class.forName(dotName, true, modLoader);
-        System.out.println("[Mod-Agent] Loaded: " + dotName + " via " + modClass.getClassLoader());
+        AgentLog.log("Loaded: " + dotName + " via " + modClass.getClassLoader());
 
         Object instance = modClass.getDeclaredConstructor().newInstance();
-        System.out.println("[Mod-Agent] Instantiated: " + dotName);
+        AgentLog.log("Instantiated: " + dotName);
 
         ModLifecycleInvoker.invokeLifecycle(instance, configDir, modLoader);
     }
@@ -612,18 +629,18 @@ public class AgentBootstrap {
         String resource = "/mappings/combined.csv";
         try (InputStream is = AgentBootstrap.class.getResourceAsStream(resource)) {
             if (is == null) {
-                System.out.println("[Mod-Agent] Mappings not found: " + resource
+                AgentLog.log("Mappings not found: " + resource
                         + " -- runtime remapping will not work!");
                 return new MappingRegistry();
             }
             MappingRegistry mappings = MappingRegistry.load(is);
-            System.out.println("[Mod-Agent] Loaded combined mappings: "
+            AgentLog.log("Loaded combined mappings: "
                     + mappings.classCount() + " classes, "
                     + mappings.methodCount() + " methods, "
                     + mappings.fieldCount() + " fields.");
             return mappings;
         } catch (Exception e) {
-            System.out.println("[Mod-Agent] Failed to load mappings " + resource + ": " + e);
+            AgentLog.log("Failed to load mappings " + resource + ": " + e);
             return new MappingRegistry();
         }
     }
@@ -631,37 +648,37 @@ public class AgentBootstrap {
     private static String buildModListProperty(List<ModEntry> mods) {
         StringBuilder sb = new StringBuilder();
         for (ModEntry mod : mods) {
-            File f = new File(mod.jar());
+            File f = new File(mod.getJar());
             if (!f.exists()) continue;
             try (JarFile jf = new JarFile(f)) {
                 for (java.util.jar.JarEntry entry : Collections.list(jf.entries())) {
                     if (!entry.getName().endsWith(".class")) continue;
                     try (InputStream is = jf.getInputStream(entry)) {
-                        byte[] bytes = is.readAllBytes();
-                        org.objectweb.asm.ClassReader cr = new org.objectweb.asm.ClassReader(bytes);
+                        byte[] bytes = toByteArray(is);
+                        ClassReader cr = new ClassReader(bytes);
                         String[] modClass = {null};
-                        cr.accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                        cr.accept(new ClassVisitor(Opcodes.ASM9) {
                             private String className;
                             @Override public void visit(int v, int a, String name, String sig, String sup, String[] i) {
                                 this.className = name;
                             }
                             @Override
-                            public org.objectweb.asm.AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+                            public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
                                 if (FORGE_MOD_DESC.equals(desc)) modClass[0] = className;
                                 return null;
                             }
-                        }, org.objectweb.asm.ClassReader.SKIP_CODE | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+                        }, ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES);
 
                         if (modClass[0] != null) {
-                            if (!sb.isEmpty()) sb.append(",");
+                            if (sb.length() > 0) sb.append(",");
                             sb.append(modClass[0])
-                                    .append("|").append(mod.property() != null ? mod.property() : "");
-                            System.out.println("[Mod-Agent] Discovered @Mod: " + modClass[0]);
+                                    .append("|").append(mod.getProperty() != null ? mod.getProperty() : "");
+                            AgentLog.log("Discovered @Mod: " + modClass[0]);
                         }
                     }
                 }
             } catch (IOException e) {
-                System.out.println("[Mod-Agent] Failed to scan JAR: " + mod.jar() + " -- " + e);
+                AgentLog.log("Failed to scan JAR: " + mod.getJar() + " -- " + e);
             }
         }
         return sb.toString();
@@ -670,13 +687,13 @@ public class AgentBootstrap {
     private static Set<String> collectModClassNames(List<ModEntry> mods) {
         Set<String> names = new HashSet<>();
         for (ModEntry mod : mods) {
-            File f = new File(mod.jar());
+            File f = new File(mod.getJar());
             if (!f.exists()) continue;
             try (JarFile jf = new JarFile(f)) {
                 jf.stream().filter(e -> e.getName().endsWith(".class"))
                         .map(e -> e.getName().replace(".class", "")).forEach(names::add);
             } catch (IOException e) {
-                System.out.println("[Mod-Agent] Failed to index JAR: " + mod.jar() + " -- " + e);
+                AgentLog.log("Failed to index JAR: " + mod.getJar() + " -- " + e);
             }
         }
         return names;
@@ -685,7 +702,7 @@ public class AgentBootstrap {
     private static List<ModEntry> parseConfig(String configPath) {
         List<ModEntry> mods = new ArrayList<>();
         try {
-            String content = Files.readString(new File(configPath).toPath());
+            String content = new String(Files.readAllBytes(new File(configPath).toPath()), StandardCharsets.UTF_8);
             String[] blocks = content.split("\\{");
             for (int i = 1; i < blocks.length; i++) {
                 String block = blocks[i];
@@ -696,7 +713,7 @@ public class AgentBootstrap {
                 if (jar != null) mods.add(new ModEntry(jar, mixin, property));
             }
         } catch (IOException e) {
-            System.out.println("[Mod-Agent] Failed to read config: " + e);
+            AgentLog.log("Failed to read config: " + e);
         }
         return mods;
     }
@@ -744,5 +761,66 @@ public class AgentBootstrap {
                 result.add(token.substring(1, token.length() - 1));
         }
         return result;
+    }
+
+    private static byte[] toByteArray(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int len;
+
+        while ((len = in.read(buffer)) != -1) {
+            out.write(buffer, 0, len);
+        }
+
+        return out.toByteArray();
+    }
+
+    private static boolean shouldBootstrapMixin(Instrumentation inst, Environment env) {
+        if (env != Environment.OBF) {
+            return false;
+        }
+
+        for (Class<?> c : inst.getAllLoadedClasses()) {
+
+            // Existing mixin env means client already bootstrapped it
+            if (c.getName().equals("org.spongepowered.asm.mixin.MixinEnvironment")) {
+                return false;
+            }
+
+            if (c.getName().startsWith("net.minecraftforge.") || c.getName().startsWith("net.minecraft.launchwrapper.")) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void bootstrapVanillaMixin() {
+
+        try {
+            AgentLog.log("Vanilla environment detected, bootstrapping Sponge Mixin.");
+
+            Thread.currentThread().setContextClassLoader(AgentBootstrap.class.getClassLoader());
+
+            ServiceLoader<IMixinService> loader = ServiceLoader.load(IMixinService.class, AgentBootstrap.class.getClassLoader());
+
+            for (IMixinService service : loader) {
+                AgentLog.log("Found mixin service: " + service.getClass().getName());
+            }
+
+            MixinBootstrap.init();
+
+            MixinEnvironment env = MixinEnvironment.getDefaultEnvironment();
+
+            env.setSide(MixinEnvironment.Side.CLIENT);
+
+            env.setObfuscationContext("notch");
+
+            AgentLog.log("MixinEnvironment created successfully.");
+
+        } catch (Throwable t) {
+            AgentLog.log("Failed vanilla mixin bootstrap: " + t);
+            t.printStackTrace();
+        }
     }
 }
