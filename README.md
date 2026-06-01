@@ -1,3 +1,5 @@
+#TODO: ACTUALLY SUPPORT VANILLA AND BADLION THIS SHIT IS MAKING ME TRIGGERED
+
 # lunar-agent
 
 > **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of Minecraft, Mixin, and Lunar Client internals.**
