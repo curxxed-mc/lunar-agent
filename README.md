@@ -7,7 +7,7 @@
 
 ---
 
-A Java agent that injects mods into Lunar Client 1.8.9 at runtime, bypassing Lunar's mod discovery entirely. Lunar remains the primary target, but the agent can also bootstrap against obfuscated vanilla-style runtimes such as vanilla and Badlion. Includes automatic obf/SRG/MCP remapping from `combined.csv`, mixin annotation patching, direct `Minecraft.startGame` bootstrapping, and bake cache invalidation.
+A Java agent that injects mods into Lunar Client 1.8.9 at runtime, bypassing Lunar's mod discovery entirely. Lunar remains the primary target, but the agent will soon also bootstrap against obfuscated vanilla-style runtimes such as vanilla and Badlion. Includes automatic obf/SRG/MCP remapping from `combined.csv`, mixin annotation patching, direct `Minecraft.startGame` bootstrapping, and bake cache invalidation.
 
 You drop a mod JAR in. It works. That's the goal.
 
