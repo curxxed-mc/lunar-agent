@@ -1,3 +1,8 @@
+AS OF OCTOBER 7 2026 Lunar Allows you to load forge mods therefore this will be archived
+
+
+
+
 #### TODO: ACTUALLY SUPPORT VANILLA AND BADLION THIS SHIT IS MAKING ME TRIGGERED
 
 # lunar-agent
