@@ -1,10 +1,4 @@
-AS OF OCTOBER 7 2026 Lunar Allows you to load forge mods therefore this will be archived
-
-
-
-
-#### TODO: ACTUALLY SUPPORT VANILLA AND BADLION THIS SHIT IS MAKING ME TRIGGERED
-
+### PROJECT HAS MOVED TO HERE: https://github.com/curxxed-mc/mod-agent
 # lunar-agent
 
 > **This project is not a user-friendly tool. It is a low-level JVM instrumentation framework that requires deep knowledge of Minecraft, Mixin, and Lunar Client internals.**
